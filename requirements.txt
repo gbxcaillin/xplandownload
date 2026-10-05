@@ -1,0 +1,6 @@
+paramiko>=3.4
+pyzipper>=0.3.6
+pyodbc>=5.0
+SQLAlchemy>=2.0
+XlsxWriter>=3.1
+python-dotenv>=1.0

@@ -1,0 +1,17 @@
+# Local SQL Server used only to restore the Iress .bak backup so it can be exported.
+#   docker compose up -d
+# The password must match SQL_PASSWORD in .env.
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${SQL_PASSWORD:-Change_Me_Str0ng!}
+    ports:
+      - "1433:1433"
+    volumes:
+      - ./data/sqlbackups:/var/opt/mssql/backups
+      - mssql-data:/var/opt/mssql
+volumes:
+  mssql-data:
