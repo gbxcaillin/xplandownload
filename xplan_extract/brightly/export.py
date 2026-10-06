@@ -63,7 +63,8 @@ def choose_sample(builder: BrightlyBuilder, entities: list[dict], size: int) -> 
 
 
 def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, source: str,
-                    sample: int = 0, progress: Progress = print) -> dict:
+                    sample: int = 0, progress: Progress = print,
+                    active_list: Path | None = None) -> dict:
     schema = Schema(schema_path)
     raw = engine.raw_connection()
     conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
@@ -79,6 +80,13 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
         entities = builder.entity_records()
         progress(f"SMSFs, trusts and companies with household roles: {len(entities):,}")
         entity_home = {int(e["ext"]["xplan"]): e["home"] for e in entities}
+        listed = None
+        if active_list:
+            from .active import match_active, read_active_list
+            listed = read_active_list(active_list)
+            builder.active = match_active(listed, builder, entity_home)
+            progress(f"Active-clients list: {len(listed)} client(s) -> "
+                     f"{len(builder.active)} active household(s)")
 
         wanted = (choose_sample(builder, entities, sample) if sample
                   else sorted(builder.households))
@@ -113,6 +121,14 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
         for t, col in data.tfn_columns:
             cur.execute(f"SELECT COUNT(*) FROM {qname(t)} WHERE {tfn_like_sql(col)}")
             writer.tfn_fields_dropped += int(cur.fetchone()[0])
+        if listed is not None:
+            from .active import write_report
+            matched, total = write_report(listed, out_dir / "active_match.csv")
+            writer.notes.append(
+                f"- **ACTIVE**: {matched} of {total} clients on the fee list were matched to a "
+                f"household (`active_match.csv` shows how; unmatched ones say NO). Households "
+                f"have `\"active\": true/false` - a field the brief doesn't define yet, so "
+                f"Brightly needs to read it (or tell us where an active flag should go).")
         manifest = writer.close(_readme(builder, writer, sample, wanted))
         manifest["sample"] = bool(sample)
         return manifest
@@ -170,6 +186,7 @@ Record counts, TFN and sensitive-field counts are in `manifest.json`.
 - Signed documents other than ATP (OFA consent, fee consent "Consent Form" notes, ID checks in `sections_identitycheck`) need Brightly's doc keys before they can be mapped.
 - File note text comes across as written in Xplan. Some notes may mention health details; they have not been altered.
 - Assets entered manually in Xplan (e.g. "Platforms") may overlap with platform accounts from data feeds.
+{chr(10).join(writer.notes)}
 - Documents themselves are in SharePoint (`XPlan Files\\Clients\\...`), listed in `documents_index.csv`.
 
 ## Rules applied

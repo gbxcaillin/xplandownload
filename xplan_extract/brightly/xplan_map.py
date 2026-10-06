@@ -443,7 +443,7 @@ class XplanData:
         return out
 
     def _load_fds(self) -> dict[int, list[dict]]:
-        cols = ["eidobj", "fee_amount", "fee_date", "revex_fee_description"]
+        cols = ["eidobj", "fee_amount", "fee_date", "revex_fee_description", "policy_number"]
         return self._group("ufield_entity_banyan_fds_cust", cols)
 
     def _load_platform_accounts(self) -> dict[int, list[dict]]:
@@ -550,6 +550,7 @@ class BrightlyBuilder:
         self.smsf_for: dict[str, list[dict]] = defaultdict(list)   # household -> SMSF facts
         self.directorships: dict[int, list[str]] = defaultdict(list)  # person -> company names
         self.counts = defaultdict(int)
+        self.active: set[str] | None = None   # household ids from the active-clients list
         self._plan_households()
 
     # -- households ---------------------------------------------------------
@@ -676,6 +677,8 @@ class BrightlyBuilder:
                      "by": "Xplan import", "kind": "Imported",
                      "m": f"Imported from Xplan client {rec.id} (Xplan status: {status})"}],
         }
+        if self.active is not None:
+            record["active"] = hh.id in self.active
         if self.is_prospect(hh):
             record.update({"prospect": True,
                            "source": clean_text(rec.f.get("referral_source")),

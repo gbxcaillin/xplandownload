@@ -295,7 +295,11 @@ def cmd_brightly(a) -> None:
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = out / (f"sample_{stamp}" if a.sample else f"export_{stamp}")
     log(f"Writing Brightly export to {out}")
-    m = export_brightly(sql_config(a).engine(db), out, a.schema, db, a.sample, progress=log)
+    active = Path(a.active_list) if a.active_list else None
+    if active and not active.is_file():
+        raise SystemExit(f"Active-clients list not found: {active}")
+    m = export_brightly(sql_config(a).engine(db), out, a.schema, db, a.sample, progress=log,
+                        active_list=active)
     log("")
     for k, v in m["record_counts"].items():
         log(f"  {k}: {v:,}")
@@ -448,6 +452,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Secure export folder (default BRIGHTLY_OUT from .env).")
     p.add_argument("--schema", default=env("BRIGHTLY_SCHEMA"),
                    help="Brightly factfind_schema.json (default BRIGHTLY_SCHEMA from .env).")
+    p.add_argument("--active-list", default=env("BRIGHTLY_ACTIVE_LIST"),
+                   help="Fees-by-client report (xlsx); listed clients get \"active\": true.")
     p.add_argument("--sample", type=int, default=0, metavar="N",
                    help="Only N households (a couple, an SMSF, a trust ...) for checking.")
     p.add_argument("--allow-any-destination", action="store_true",
