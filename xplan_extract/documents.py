@@ -193,12 +193,14 @@ def wait_for_space(folder: Path, needed: int, min_free: int, progress: Progress,
 # Database lookups
 # --------------------------------------------------------------------------
 
-_KEY_COLUMNS = ("entityid", "entity_id", "eid", "eidobj", "id")
-_FULL_NAME_COLUMNS = ("display_name", "full_name", "fullname", "client_name",
-                      "entity_name", "name")
+_KEY_COLUMNS = ("entityid", "entity_id", "eidobj", "eid", "clientid", "client_id", "id")
+_FULL_NAME_COLUMNS = ("display_name", "full_name", "fullname", "client_name", "entity_name",
+                      "name", "company_name", "trust_name", "business_name", "trading_name",
+                      "organisation_name", "organization_name", "fund_name")
 _FIRST_NAME_COLUMNS = ("preferred_name", "first_name", "firstname", "given_name",
-                       "known_as")
+                       "given_names", "known_as")
 _LAST_NAME_COLUMNS = ("last_name", "surname", "lastname", "family_name")
+MIN_COVERAGE = 0.05  # a name table must cover at least 5% of the clients on file notes
 
 
 @dataclass
@@ -207,51 +209,99 @@ class EntityNames:
     source: str = "none found - folders will be named by client id"
 
 
-def find_entity_names(conn, table: str | None = None, key: str | None = None,
-                      name_expr: str | None = None) -> EntityNames:
-    """Look up client names by entity id, guessing the table/columns unless given."""
-    cur = conn.cursor()
-    if not table:
-        rows = cur.execute("""
-            SELECT s.name + '.' + t.name, LOWER(c.name)
-            FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
-            JOIN sys.columns c ON c.object_id = t.object_id
-            WHERE t.is_ms_shipped = 0
-              AND (t.name = 'entity' OR t.name LIKE 'entity[_]%' OR t.name LIKE 'sections[_]entity%'
-                   OR t.name IN ('client', 'clients', 'entities', 'ufield_entity'))
-              AND t.name NOT LIKE '%#%'
-        """).fetchall()
-        tables: dict[str, set[str]] = {}
-        for tname, cname in rows:
-            tables.setdefault(tname, set()).add(cname)
-
-        def rank(tname: str) -> tuple:
-            short = tname.split(".", 1)[1].lower()
-            order = ["entity", "ufield_entity", "sections_entity", "client", "clients", "entities"]
-            return (order.index(short) if short in order else len(order), len(short))
-
-        for tname in sorted(tables, key=rank):
-            cols = tables[tname]
-            k = next((c for c in _KEY_COLUMNS if c in cols), None)
-            expr = _name_expression(cols)
-            if k and expr:
-                table, key, name_expr = tname, k, expr
-                break
-    if not (table and key and name_expr):
-        return EntityNames()
-
+def _quote_table(table: str) -> str:
     schema, tname = table.split(".", 1) if "." in table else ("dbo", table)
-    target = f"[{schema}].[{tname.replace(']', ']]')}]"
-    names: dict[int, str] = {}
-    for eid, name in cur.execute(f"SELECT [{key}], {name_expr} FROM {target}"):
+    return f"[{schema.replace(']', ']]')}].[{tname.replace(']', ']]')}]"
+
+
+def _load_names(cur, table: str, key: str, name_expr: str, into: dict[int, str]) -> int:
+    added = 0
+    for eid, name in cur.execute(f"SELECT [{key}], {name_expr} FROM {_quote_table(table)}"):
         try:
             eid = int(eid)
         except (TypeError, ValueError):
             continue
         name = re.sub(r"\s+", " ", str(name or "")).strip()
-        if name and eid not in names:
-            names[eid] = name
-    return EntityNames(names, f"{table} (id: {key}, name: {name_expr}) - {len(names):,} names")
+        if name and name.lower() != "none" and eid not in into:
+            into[eid] = name
+            added += 1
+    return added
+
+
+def find_entity_names(conn, table: str | None = None, key: str | None = None,
+                      name_expr: str | None = None) -> EntityNames:
+    """Client names by entity id.
+
+    Unless a table is given, every table with an id column and name-like columns is scored by
+    how many of the clients linked to file notes it names; the best ones are used, the next
+    best filling in clients the first didn't have (e.g. people in one table, trusts and
+    companies in another).
+    """
+    cur = conn.cursor()
+    if table:
+        if not (key and name_expr):
+            cols = {r[0].lower() for r in cur.execute(
+                "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?)",
+                _quote_table(table)).fetchall()}
+            key = key or next((c for c in _KEY_COLUMNS if c in cols), None)
+            name_expr = name_expr or _name_expression(cols)
+        if not (key and name_expr):
+            return EntityNames(source=f"{table}: could not find id/name columns")
+        names: dict[int, str] = {}
+        _load_names(cur, table, key, name_expr, names)
+        return EntityNames(names, f"{table} (id: {key}) - {len(names):,} names")
+
+    rows = cur.execute("""
+        SELECT s.name + '.' + t.name, LOWER(c.name)
+        FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+        JOIN sys.columns c ON c.object_id = t.object_id
+        WHERE t.is_ms_shipped = 0
+    """).fetchall()
+    tables: dict[str, set[str]] = {}
+    for tname, cname in rows:
+        tables.setdefault(tname, set()).add(cname)
+    candidates = []
+    for tname, cols in tables.items():
+        k = next((c for c in _KEY_COLUMNS if c in cols), None)
+        expr = _name_expression(cols)
+        if k and expr:
+            candidates.append((tname, k, expr))
+
+    has_relation = _table_exists(conn, RELATION)
+    total = cur.execute(f"SELECT COUNT(DISTINCT related_id) FROM {RELATION}").fetchone()[0] \
+        if has_relation else 0
+    scored = []
+    for tname, k, expr in candidates:
+        try:
+            if has_relation:
+                n = cur.execute(f"""
+                    SELECT COUNT(DISTINCT r.related_id) FROM {RELATION} r
+                    WHERE EXISTS (SELECT 1 FROM {_quote_table(tname)} c
+                                  WHERE TRY_CAST(c.[{k}] AS bigint) = r.related_id
+                                    AND NULLIF(LTRIM(RTRIM({expr})), '') IS NOT NULL)
+                """).fetchone()[0]
+            else:
+                n = cur.execute(f"SELECT COUNT(*) FROM {_quote_table(tname)}").fetchone()[0]
+        except Exception:
+            continue
+        if n:
+            scored.append((n, k != "id", -len(tname), tname, k, expr))
+    scored.sort(reverse=True)
+
+    names: dict[int, str] = {}
+    used = []
+    for n, _, _, tname, k, expr in scored:
+        if total and n < total * MIN_COVERAGE:
+            break
+        added = _load_names(cur, tname, k, expr, names)
+        if added:
+            share = f"{n / total:.0%} of clients" if total else f"{n:,} rows"
+            used.append(f"{tname} [{k}] ({share})")
+        if len(used) == 3:
+            break
+    if not names:
+        return EntityNames()
+    return EntityNames(names, f"{len(names):,} names from " + ", ".join(used))
 
 
 def _name_expression(cols: set[str]) -> str | None:
