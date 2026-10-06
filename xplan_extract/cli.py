@@ -281,6 +281,14 @@ def cmd_documents(a) -> None:
         log(f"  {len(stats.errors):,} file(s) could not be saved, e.g. {stats.errors[0]}")
 
 
+def cmd_profile(a) -> None:
+    from . import profile
+
+    db = pick_database(a)
+    profile.profile_database(sql_config(a).engine(db), a.out, db, progress=log,
+                             include_empty=a.include_empty)
+
+
 def cmd_describe(a) -> None:
     db = pick_database(a)
     sqlserver.describe_tables(sql_config(a).engine(db), a.patterns, progress=log)
@@ -408,6 +416,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")
     add_sql_args(p)
     p.set_defaults(func=cmd_documents)
+
+    p = sub.add_parser("profile", help="Profile every table/column for data mapping, with "
+                                       "personal details masked.")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    p.add_argument("--out", type=Path, default=Path(env("OUTPUT_DIR", "output")))
+    p.add_argument("--include-empty", action="store_true")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_profile)
 
     p = sub.add_parser("describe", help="Show the columns of some tables and what files "
                                         "their binary columns hold (no client data).")
