@@ -21,7 +21,10 @@ import openpyxl
 from . import clean_text
 
 HEADINGS = {"policy number": "policy", "client no": "client_no", "client / owner": "owner",
-            "crm reference": "crm", "transaction no": "txn"}
+            "crm reference": "crm", "transaction no": "txn",
+            "transaction amount inc gst $": "amount"}
+CONFIRM_FILE = "active_clients_to_confirm.xlsx"
+CONFIRM_COLUMN = "Confirmed Xplan ID"
 
 
 @dataclass
@@ -33,6 +36,7 @@ class ListedClient:
     crm_refs: set[int] = field(default_factory=set)
     households: set[str] = field(default_factory=set)
     method: str = ""
+    fees: float = 0.0
 
 
 POLICY_SOURCES = [  # table, number columns, client column
@@ -159,13 +163,38 @@ def read_active_list(path: Path) -> list[ListedClient]:
                 current.client_nos.add(get("client_no"))
             if re.fullmatch(r"\d{1,9}", get("crm")):
                 current.crm_refs.add(int(get("crm")))
+            try:
+                current.fees += float(get("amount") or 0)
+            except ValueError:
+                pass
     return clients
 
 
-def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str]) -> set[str]:
+def read_confirmed(path: Path) -> dict[str, list[str]]:
+    """Scott's answers: listed client name -> Xplan ids, or [] for "not in Xplan"."""
+    out: dict[str, list[str]] = {}
+    if not path or not Path(path).is_file():
+        return out
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    for ws in wb.worksheets:
+        rows = ws.iter_rows(values_only=True)
+        head = [_cell(h) for h in next(rows, [])]
+        if CONFIRM_COLUMN not in head or "Client on fee list" not in head:
+            continue
+        ci, ni = head.index(CONFIRM_COLUMN), head.index("Client on fee list")
+        for r in rows:
+            name, answer = _cell(r[ni]) if ni < len(r) else "", _cell(r[ci]) if ci < len(r) else ""
+            if name and answer:
+                out[name] = re.findall(r"\d+", answer)
+    return out
+
+
+def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str],
+                 confirmed: dict[str, list[str]] | None = None) -> set[str]:
     """Fill in each listed client's households; return all active household ids."""
     d = builder.d
     home_of = lambda eid: builder.person_home.get(eid, (entity_home.get(eid),))[0]
+    confirmed = confirmed or {}
 
     by_policy: dict[str, set[int]] = {}
 
@@ -220,6 +249,12 @@ def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str
 
     active: set[str] = set()
     for c in listed:
+        if c.name in confirmed:
+            ids = confirmed[c.name]
+            c.households = {home_of(int(i)) for i in ids} - {None}
+            c.method = "Confirmed by Scott" if ids else "Confirmed: not in Xplan"
+            active |= c.households
+            continue
         homes = {home_of(e) for e in c.crm_refs} - {None}
         if homes:
             c.method = "CRM Reference"
@@ -291,7 +326,8 @@ def compute_active(engine, list_path: Path, progress=print):
         entities = builder.entity_records()
         entity_home = {int(e["ext"]["xplan"]): e["home"] for e in entities}
         listed = read_active_list(list_path)
-        households = match_active(listed, builder, entity_home)
+        households = match_active(listed, builder, entity_home,
+                                  read_confirmed(list_path.parent / CONFIRM_FILE))
         return active_entity_ids(builder, entities, households), listed
     finally:
         raw.close()
@@ -354,3 +390,110 @@ def diagnose(listed: list[ListedClient], builder, entity_home: dict[int, str]) -
                  + ", ".join(f"{s} ({n})" for s, n in xplan.most_common(6)))
     lines.append(f"Xplan fee (FDS) records cover {len(d.fds):,} client records.")
     return lines
+
+
+def unmatched_reason(c: ListedClient, builder, entity_home: dict[int, str],
+                     surnames: dict[str, list[str]]) -> str:
+    d = builder.d
+    for ref in c.crm_refs:
+        e = d.entities.get(ref)
+        if e is None:
+            return f"CRM Reference {ref} is not in this Xplan extract"
+        return f"CRM Reference {ref} is an Xplan {e.type or 'record'} not linked to a household"
+    name = c.name
+    words = re.findall(r"[A-Za-z']+", name)
+    if re.search(r"pty|ltd|limited|trust|super|fund|smsf|atf|holdings|investments", name, re.I):
+        return "Company / trust / fund name not found in Xplan"
+    if "&" in name or re.search(r"\band\b", name, re.I):
+        return "Two people on one line, not found as written"
+    last = (name.split(",")[0] if "," in name else (words[-1] if words else "")).strip().lower()
+    if any(len(w) == 1 for w in words):
+        return ("Initials match more than one Xplan client" if surnames.get(last)
+                else "Initials only, surname not in Xplan")
+    if surnames.get(last):
+        return "Surname is in Xplan but the first name differs (nickname?)"
+    return "Name not found in Xplan (not in this database, or spelt differently?)"
+
+
+def write_confirm_workbook(listed: list[ListedClient], builder, entity_home: dict[int, str],
+                           path: Path) -> int:
+    """Clients for Scott to confirm, plus the less certain automatic matches."""
+    import xlsxwriter
+
+    surnames: dict[str, list[str]] = {}
+    for hid, hh in builder.households.items():
+        for p in hh.people:
+            last = clean_text(p.f.get("last_name"))
+            if last:
+                surnames.setdefault(last.lower(), []).append(f"{p.name} (Xplan ID {p.id})")
+    for eid in entity_home:
+        e = builder.d.entities.get(eid)
+        if e:
+            for w in re.findall(r"[A-Za-z']+", e.name)[:1]:
+                surnames.setdefault(w.lower(), []).append(f"{e.name} (Xplan ID {eid})")
+
+    def candidates(c: ListedClient) -> str:
+        found: list[str] = []
+        for n in [c.name, *c.owners]:
+            for v in name_variants(n):
+                words = re.findall(r"[A-Za-z']+", v)
+                last = (v.split(",")[0] if "," in v else (words[-1] if words else "")).strip()
+                for cand in surnames.get(last.lower(), []):
+                    if cand not in found:
+                        found.append(cand)
+        return "; ".join(found[:8]) + (" ..." if len(found) > 8 else "")
+
+    wb = xlsxwriter.Workbook(str(path), {"strings_to_formulas": False, "strings_to_urls": False})
+    bold = wb.add_format({"bold": True, "bg_color": "#DDEBF7", "border": 1, "text_wrap": True})
+    money = wb.add_format({"num_format": "$#,##0.00"})
+    fill = wb.add_format({"bg_color": "#FFF2CC", "border": 1})
+    ws = wb.add_worksheet("To confirm")
+    heads = ["Client on fee list", "Fees (12 months, inc GST)", "Why it didn't match",
+             "Possible Xplan matches (same surname)", CONFIRM_COLUMN, "Notes"]
+    for i, h in enumerate(heads):
+        ws.write(0, i, h, bold)
+    todo = [c for c in listed if not c.households]
+    for r, c in enumerate(sorted(todo, key=lambda c: -c.fees), 1):
+        ws.write(r, 0, c.name)
+        ws.write_number(r, 1, round(c.fees, 2), money)
+        ws.write(r, 2, unmatched_reason(c, builder, entity_home, surnames))
+        ws.write(r, 3, candidates(c))
+        ws.write_blank(r, 4, None, fill)
+        ws.write_blank(r, 5, None)
+    ws.set_column(0, 0, 38)
+    ws.set_column(1, 1, 14)
+    ws.set_column(2, 2, 48)
+    ws.set_column(3, 3, 70)
+    ws.set_column(4, 4, 20)
+    ws.set_column(5, 5, 30)
+    ws.freeze_panes(1, 1)
+    note_row = len(todo) + 2
+    ws.write(note_row, 0, f"How to answer: put the client's Xplan ID in '{CONFIRM_COLUMN}' "
+             "(two IDs separated by a comma for a couple), or write 'not in Xplan'. "
+             "The next export reads this file and uses the answers.")
+
+    ws2 = wb.add_worksheet("Check these matches")
+    heads2 = ["Client on fee list", "Fees (12 months, inc GST)", "Matched how",
+              "Matched to (Brightly household)", CONFIRM_COLUMN, "Notes"]
+    for i, h in enumerate(heads2):
+        ws2.write(0, i, h, bold)
+    unsure = [c for c in listed if c.households and (
+        c.method.startswith(("Surname", "Name, ignoring")) or len(c.households) > 1)]
+    for r, c in enumerate(sorted(unsure, key=lambda c: -c.fees), 1):
+        names = "; ".join(f"{builder.households[h].record_entity.name if h in builder.households else h}"
+                          f" ({h})" for h in sorted(c.households))
+        ws2.write(r, 0, c.name)
+        ws2.write_number(r, 1, round(c.fees, 2), money)
+        ws2.write(r, 2, c.method)
+        ws2.write(r, 3, names)
+        ws2.write_blank(r, 4, None, fill)
+    ws2.set_column(0, 0, 38)
+    ws2.set_column(1, 1, 14)
+    ws2.set_column(2, 2, 34)
+    ws2.set_column(3, 3, 60)
+    ws2.set_column(4, 5, 24)
+    ws2.freeze_panes(1, 1)
+    ws2.write(len(unsure) + 2, 0, "Only fill in the yellow column if a match is wrong: put the "
+              "right Xplan ID, or 'not in Xplan'.")
+    wb.close()
+    return len(todo)

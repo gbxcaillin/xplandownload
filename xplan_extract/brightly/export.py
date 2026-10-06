@@ -83,9 +83,12 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
         entity_home = {int(e["ext"]["xplan"]): e["home"] for e in entities}
         listed = None
         if active_list:
-            from .active import match_active, read_active_list
+            from .active import CONFIRM_FILE, match_active, read_active_list, read_confirmed
             listed = read_active_list(active_list)
-            builder.active = match_active(listed, builder, entity_home)
+            confirmed = read_confirmed(active_list.parent / CONFIRM_FILE)
+            if confirmed:
+                progress(f"Using {len(confirmed)} answer(s) from {CONFIRM_FILE}")
+            builder.active = match_active(listed, builder, entity_home, confirmed)
             progress(f"Active-clients list: {len(listed)} client(s) -> "
                      f"{len(builder.active)} active household(s)")
             if diagnose_active:
@@ -135,8 +138,13 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
             cur.execute(f"SELECT COUNT(*) FROM {qname(t)} WHERE {tfn_like_sql(col)}")
             writer.tfn_fields_dropped += int(cur.fetchone()[0])
         if listed is not None:
-            from .active import write_report
+            from .active import CONFIRM_FILE, write_confirm_workbook, write_report
             matched, total = write_report(listed, out_dir / "active_match.csv")
+            confirm_path = active_list.parent / CONFIRM_FILE
+            if confirm_path.exists():
+                confirm_path = out_dir / CONFIRM_FILE  # never overwrite Scott's answers
+            todo = write_confirm_workbook(listed, builder, entity_home, confirm_path)
+            progress(f"{todo} client(s) to confirm: {confirm_path}")
             writer.notes.append(
                 f"- **Active / Inactive**: {matched} of {total} clients on the fee list were "
                 f"matched to a household (`active_match.csv` shows how; unmatched ones say NO). "
