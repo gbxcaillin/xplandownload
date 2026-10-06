@@ -77,9 +77,9 @@ def download(
                        banner_timeout=30, auth_timeout=30)
     except paramiko.AuthenticationException as exc:
         raise SftpError(
-            "Authentication failed. Check the username/password from the encrypted email "
-            "(copy & paste, no spaces before/after). If they are correct, the account may "
-            "have expired (requests close after 2 weeks) or your IP may not be whitelisted."
+            f"Authentication failed ({exc}). Check the username/password from the encrypted "
+            "email (copy & paste, no spaces before/after). If they are correct, the account "
+            "may have expired (requests close after 2 weeks) or your IP may not be whitelisted."
         ) from exc
     except (OSError, paramiko.SSHException) as exc:
         if isinstance(exc, SftpError):
