@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import fnmatch
 import json
 import math
 import re
@@ -59,6 +60,7 @@ class TableInfo:
     excel_file: str | None = None
     excel_sheets: list[str] = field(default_factory=list)
     truncated_cells: int = 0
+    skipped_columns: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -145,11 +147,17 @@ def file_stem_for(table: TableInfo) -> str:
 # Table discovery
 # --------------------------------------------------------------------------
 
+def _matches(table: TableInfo, patterns: Iterable[str]) -> bool:
+    names = (table.full_name.lower(), table.name.lower())
+    return any(fnmatch.fnmatchcase(n, pat.lower()) for pat in patterns for n in names)
+
+
 def list_tables(
     engine: sa.Engine,
     schemas: Iterable[str] | None = None,
     include_views: bool = False,
     only: Iterable[str] | None = None,
+    exclude: Iterable[str] | None = None,
 ) -> list[TableInfo]:
     schemas = list(schemas) if schemas else None
     if engine.dialect.name == "mssql":
@@ -161,8 +169,9 @@ def list_tables(
         wanted = {s.lower() for s in schemas}
         tables = [t for t in tables if (t.schema or "").lower() in wanted]
     if only:
-        wanted = {o.lower() for o in only}
-        tables = [t for t in tables if t.full_name.lower() in wanted or t.name.lower() in wanted]
+        tables = [t for t in tables if _matches(t, only)]
+    if exclude:
+        tables = [t for t in tables if not _matches(t, exclude)]
     return tables
 
 
@@ -231,11 +240,29 @@ def _list_tables_generic(
     return found
 
 
-def _select_sql(engine: sa.Engine, table: TableInfo) -> str:
+BINARY_TYPES = ("varbinary", "binary", "image", "blob", "bytea", "largebinary")
+
+
+def is_binary_type(type_label: str) -> bool:
+    base = type_label.split("(")[0].strip().lower()
+    return base in BINARY_TYPES
+
+
+def _select_sql(engine: sa.Engine, table: TableInfo, skip_binary: bool = False) -> str:
     prep = engine.dialect.identifier_preparer
     target = prep.quote(table.name)
     if table.schema:
         target = f"{prep.quote_schema(table.schema)}.{target}"
+
+    if skip_binary and table.columns:
+        kept = [c for c in table.columns if not is_binary_type(c.type)]
+        table.skipped_columns = [c.name for c in table.columns if is_binary_type(c.type)]
+        if not kept:
+            raise ValueError("table only has binary columns (skipped by --no-binary)")
+        table.columns = kept
+        if engine.dialect.name != "mssql":
+            cols = ", ".join(prep.quote(c.name) for c in kept)
+            return f"SELECT {cols} FROM {target}"
 
     if engine.dialect.name == "mssql" and table.columns:
         parts = []
@@ -367,6 +394,8 @@ class ExcelWorkbook:
             notes.append(f"ERROR: {table.error}")
         if table.row_count == 0 and not table.error:
             notes.append("empty")
+        if table.skipped_columns:
+            notes.append("binary columns left out: " + ", ".join(table.skipped_columns))
         if table.truncated_cells:
             notes.append(
                 f"{table.truncated_cells} cell(s) longer than {EXCEL_MAX_CELL_CHARS} "
@@ -499,6 +528,8 @@ class ExportOptions:
     include_views: bool = False
     schemas: list[str] | None = None
     tables: list[str] | None = None
+    exclude: list[str] | None = None
+    skip_binary: bool = False           # leave out binary columns (stored files/images)
     batch_size: int = 5000
     max_rows_per_sheet: int = EXCEL_MAX_ROWS - 1
 
@@ -515,7 +546,7 @@ def export_database(
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_label = _FILE_BAD_CHARS.sub("_", database_label) or "database"
 
-    tables = list_tables(engine, opts.schemas, opts.include_views, opts.tables)
+    tables = list_tables(engine, opts.schemas, opts.include_views, opts.tables, opts.exclude)
     progress(f"Found {len(tables)} table(s) to export.")
 
     json_dir = out_dir / "json"
@@ -584,6 +615,7 @@ def export_database(
                 "excel_file": t.excel_file,
                 "excel_sheets": t.excel_sheets,
                 "excel_truncated_cells": t.truncated_cells,
+                "skipped_binary_columns": t.skipped_columns,
                 "error": t.error,
             }
             for t in tables
@@ -596,7 +628,7 @@ def export_database(
 
 def _export_table(engine, table, opts, workbook, combined, json_dir, excel_dir,
                   json_names, excel_file_names) -> None:
-    sql = _select_sql(engine, table)
+    sql = _select_sql(engine, table, opts.skip_binary)
     exec_opts = {}
     if engine.dialect.supports_server_side_cursors:
         exec_opts["stream_results"] = True

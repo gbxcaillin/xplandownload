@@ -90,3 +90,19 @@ def test_unique_names():
     assert names.take(long.upper()) == "X" * 29 + "~2"
     assert names.take("Index") == "Index"
     assert names.take("index") == "index~2"
+
+
+def test_wildcards_and_exclude(engine, tmp_path):
+    manifest = export_database(engine, tmp_path / "o", "src",
+                               ExportOptions(tables=["*i*"], exclude=["big"]),
+                               progress=lambda m: None)
+    assert [t["name"] for t in manifest["tables"]] == ["client"]
+
+
+def test_no_binary(engine, tmp_path):
+    out = tmp_path / "o"
+    manifest = export_database(engine, out, "src", ExportOptions(tables=["client"], skip_binary=True),
+                               progress=lambda m: None)
+    assert manifest["tables"][0]["skipped_binary_columns"] == ["photo"]
+    rows = json.loads((out / "json" / "client.json").read_text(encoding="utf-8"))
+    assert "photo" not in rows[0] and rows[0]["name"] == "=1+1"

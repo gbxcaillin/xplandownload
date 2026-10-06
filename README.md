@@ -75,13 +75,27 @@ Already downloaded the zip with FileZilla? Skip the download step:
 python -m xplan_extract run --zip "C:\Users\me\Desktop\Data Extract\extract_xxx.zip"
 ```
 
+### Large databases: look before you export
+
+```
+python -m xplan_extract tables
+```
+lists every table with its row count, size and binary columns (stored documents/images), and
+saves the full list to `output/tables_<database>.csv`. Use it to choose what to export, e.g.
+
+```
+python -m xplan_extract export --no-binary --exclude "*audit*" --exclude "*log*"
+```
+
 ### Individual steps
 
 ```
 python -m xplan_extract download                  # SFTP download only -> data/download
 python -m xplan_extract unzip  data/download/x.zip
-python -m xplan_extract restore data/extracted/x/backup.bak [--replace] [--database-name NAME]
-python -m xplan_extract export --database NAME    # re-export an already restored database
+python -m xplan_extract info   data/download/x.zip   # what's inside and how big unzipped
+python -m xplan_extract restore data/extracted/x/backup.bak [--check-only] [--replace]
+python -m xplan_extract tables                    # table sizes in the restored database
+python -m xplan_extract export                    # export the restored database
 ```
 
 ### Export options
@@ -93,7 +107,9 @@ python -m xplan_extract export --database NAME    # re-export an already restore
 | `--jsonl` | per-table JSON Lines (one row per line; better for very large tables) |
 | `--include-empty` | also create sheets/files for tables with 0 rows (they're always listed in the Index/manifest) |
 | `--include-views` | export views too |
-| `--schema S`, `--table T` | only some schemas/tables (repeatable) |
+| `--schema S`, `--table T` | only some schemas/tables (repeatable, wildcards like `client*` allowed) |
+| `--exclude T` | skip tables (repeatable, wildcards allowed) |
+| `--no-binary` | leave out binary columns (stored documents/images) |
 | `--no-excel`, `--no-json` | skip one format |
 
 ## Things to know about the output

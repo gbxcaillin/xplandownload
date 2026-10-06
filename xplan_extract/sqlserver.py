@@ -87,6 +87,41 @@ def _install_output_converters(dbapi_conn, _record) -> None:
         dbapi_conn.add_output_converter(-155, _datetimeoffset)
 
 
+def user_databases(cfg: SqlServerConfig) -> list[str]:
+    conn = _connect_master(cfg)
+    try:
+        rows = conn.cursor().execute(
+            "SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc = 'ONLINE' "
+            "AND name NOT IN ('ReportServer', 'ReportServerTempDB') ORDER BY name").fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def table_sizes(engine: sa.Engine) -> list[dict]:
+    """Every user table with its row count, size on disk and binary columns."""
+    sql = sa.text("""
+        SELECT s.name AS schema_name, t.name AS table_name,
+               SUM(CASE WHEN ps.index_id IN (0, 1) THEN ps.row_count ELSE 0 END) AS row_count,
+               SUM(ps.reserved_page_count) * 8 / 1024.0 AS size_mb,
+               (SELECT COUNT(*) FROM sys.columns c
+                 WHERE c.object_id = t.object_id) AS column_count,
+               STUFF((SELECT ', ' + c.name FROM sys.columns c
+                        JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+                       WHERE c.object_id = t.object_id
+                         AND ty.name IN ('varbinary', 'binary', 'image')
+                       FOR XML PATH('')), 1, 2, '') AS binary_columns
+        FROM sys.tables t
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        JOIN sys.dm_db_partition_stats ps ON ps.object_id = t.object_id
+        WHERE t.is_ms_shipped = 0
+        GROUP BY s.name, t.name, t.object_id
+        ORDER BY size_mb DESC, s.name, t.name
+    """)
+    with engine.connect() as conn:
+        return [dict(r._mapping) for r in conn.execute(sql)]
+
+
 # --------------------------------------------------------------------------
 # Restore
 # --------------------------------------------------------------------------

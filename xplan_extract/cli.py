@@ -107,7 +107,12 @@ def add_export_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--include-views", action="store_true")
     g.add_argument("--schema", action="append", dest="schemas", help="Only these schemas.")
     g.add_argument("--table", action="append", dest="tables",
-                   help="Only these tables (name or schema.name). Repeatable.")
+                   help="Only these tables (name or schema.name, wildcards like client* "
+                        "allowed). Repeatable.")
+    g.add_argument("--exclude", action="append",
+                   help="Skip these tables (wildcards allowed). Repeatable.")
+    g.add_argument("--no-binary", action="store_true",
+                   help="Leave out binary columns (stored documents/images).")
     g.add_argument("--batch-size", type=int, default=5000)
 
 
@@ -126,7 +131,7 @@ def export_options(a: argparse.Namespace) -> exporter.ExportOptions:
         excel=not a.no_excel, json=not a.no_json, excel_layout=a.excel_layout,
         json_layout=a.json_layout, jsonl=a.jsonl, include_empty=a.include_empty,
         include_views=a.include_views, schemas=a.schemas, tables=a.tables,
-        batch_size=a.batch_size,
+        exclude=a.exclude, skip_binary=a.no_binary, batch_size=a.batch_size,
     )
 
 
@@ -223,12 +228,56 @@ def cmd_export(a) -> None:
         engine = sa.create_engine(a.url)
         label = engine.url.database or "database"
         label = Path(label).stem if engine.dialect.name == "sqlite" else label
-    elif a.database:
-        engine = sql_config(a).engine(a.database)
-        label = a.database
     else:
-        raise SystemExit("Pass --database NAME (SQL Server) or --url SQLALCHEMY_URL.")
+        label = pick_database(a)
+        engine = sql_config(a).engine(label)
     step_export(engine, label, a)
+
+
+def pick_database(a) -> str:
+    """The --database given, or the only restored database on the server."""
+    if a.database:
+        return a.database
+    names = sqlserver.user_databases(sql_config(a))
+    if len(names) == 1:
+        log(f"Using database '{names[0]}'")
+        return names[0]
+    raise SystemExit("Pass --database NAME. Databases on this server: "
+                     + (", ".join(names) or "none (restore the backup first)"))
+
+
+def cmd_tables(a) -> None:
+    import csv
+
+    db = pick_database(a)
+    rows = sqlserver.table_sizes(sql_config(a).engine(db))
+    a.out.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^\w.-]", "_", db)
+    csv_path = a.out / f"tables_{safe}.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["table", "rows", "size_mb", "columns", "binary_columns"])
+        for r in rows:
+            writer.writerow([f"{r['schema_name']}.{r['table_name']}", r["row_count"],
+                             round(float(r["size_mb"]), 1), r["column_count"],
+                             r["binary_columns"] or ""])
+
+    total_mb = sum(float(r["size_mb"]) for r in rows)
+    with_rows = sum(1 for r in rows if r["row_count"])
+    binary_mb = sum(float(r["size_mb"]) for r in rows if r["binary_columns"])
+    log(f"{len(rows)} tables ({with_rows} with data, {len(rows) - with_rows} empty), "
+        f"{total_mb / 1024:,.1f} GB in total.")
+    log(f"Tables with binary columns (stored files/images): {binary_mb / 1024:,.1f} GB")
+    log("")
+    log(f"{'Table':<55} {'Rows':>13} {'Size MB':>10}  Binary columns")
+    for r in rows[: a.top]:
+        name = f"{r['schema_name']}.{r['table_name']}"
+        log(f"{name[:55]:<55} {r['row_count']:>13,} {float(r['size_mb']):>10,.1f}  "
+            f"{(r['binary_columns'] or '')[:40]}")
+    if len(rows) > a.top:
+        log(f"... {len(rows) - a.top} more")
+    log("")
+    log(f"Full list: {csv_path}")
 
 
 def cmd_run(a) -> None:
@@ -300,8 +349,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Only show how much space the restore needs; don't restore.")
     p.set_defaults(func=cmd_restore)
 
+    p = sub.add_parser("tables", help="List the restored tables with row counts and sizes.")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    p.add_argument("--top", type=int, default=40, help="How many of the largest to show.")
+    p.add_argument("--out", type=Path, default=Path(env("OUTPUT_DIR", "output")))
+    add_sql_args(p)
+    p.set_defaults(func=cmd_tables)
+
     p = sub.add_parser("export", help="Export an already-restored database to Excel/JSON.")
-    p.add_argument("--database", help="SQL Server database name.")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
     p.add_argument("--url", help="Any SQLAlchemy URL instead, e.g. sqlite:///file.db")
     add_sql_args(p); add_export_args(p)
     p.set_defaults(func=cmd_export)
