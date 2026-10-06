@@ -66,7 +66,8 @@ def _fetch(sftp: paramiko.SFTPClient, remote: str, partial: Path, total: int, la
     if start:
         progress(f"  resuming from {_fmt_size(start)} already downloaded")
     done = start
-    began = last = time.monotonic()
+    last = time.monotonic()
+    last_done = start
     with sftp.open(remote, "rb") as src, open(partial, "ab") as dst:
         src.seek(start)
         src.prefetch(total - start, max_concurrent_requests=64)
@@ -78,8 +79,9 @@ def _fetch(sftp: paramiko.SFTPClient, remote: str, partial: Path, total: int, la
             done += len(chunk)
             now = time.monotonic()
             if now - last >= report_every or done >= total:
-                last = now
-                rate = (done - start) / max(now - began, 1e-6)
+                # Speed over the last interval, so a slowdown shows up straight away.
+                rate = (done - last_done) / max(now - last, 1e-6)
+                last, last_done = now, done
                 eta = (total - done) / rate if rate else 0
                 progress(f"  {label}: {done * 100 / total:5.1f}%  {_fmt_size(done)} of "
                          f"{_fmt_size(total)}  {_fmt_size(rate)}/s  "
