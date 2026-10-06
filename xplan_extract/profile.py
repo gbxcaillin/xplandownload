@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Callable
@@ -21,6 +22,7 @@ import xlsxwriter
 Progress = Callable[[str], None]
 
 SAMPLE_ROWS = 2000
+STATS_ROWS = 50_000   # bigger tables: fill rates and distinct counts from this many rows
 MAX_PICKLIST = 30
 SKIP_TYPES = {"varbinary", "binary", "image", "timestamp", "geography", "geometry",
               "hierarchyid", "sql_variant", "xml"}
@@ -64,13 +66,18 @@ def profile_database(engine: sa.Engine, out_dir: Path, label: str,
         for i, t in enumerate(sorted(tables, key=lambda t: (t["schema_name"], t["table_name"])), 1):
             full = f"{t['schema_name']}.{t['table_name']}"
             target = f"{_quote(t['schema_name'])}.{_quote(t['table_name'])}"
-            if i % 25 == 0:
-                progress(f"  {i}/{len(tables)} {full}")
+            rows = int(t["row_count"])
+            progress(f"  {i}/{len(tables)} {full} ({rows:,} rows"
+                     + (f", sampling {STATS_ROWS:,})" if rows > STATS_ROWS else ")"))
+            started = time.monotonic()
             try:
-                result.append(_profile_table(conn, full, target, int(t["row_count"])))
+                result.append(_profile_table(conn, full, target, rows))
             except Exception as exc:  # keep going
-                result.append({"table": full, "rows": int(t["row_count"]),
+                result.append({"table": full, "rows": rows,
                                "error": str(exc).splitlines()[0][:300], "columns": []})
+            took = time.monotonic() - started
+            if took > 20:
+                progress(f"     took {took:,.0f}s")
 
     safe = re.sub(r"[^\w.-]", "_", label)
     json_path = out_dir / f"profile_{safe}.json"
@@ -90,6 +97,11 @@ def _profile_table(conn, full: str, target: str, rows: int) -> dict:
         WHERE c.object_id = OBJECT_ID(:obj) ORDER BY c.column_id
     """), {"obj": target}).all()
     info = {"table": full, "rows": rows, "columns": []}
+    sampled = rows > STATS_ROWS
+    source = f"(SELECT TOP {STATS_ROWS} * FROM {target}) AS s" if sampled else target
+    base_rows = min(rows, STATS_ROWS)
+    if sampled:
+        info["stats_sampled_rows"] = STATS_ROWS
     names = [c.name for c in cols]
     info["links_to_client_by"] = next((c for c in names if c.lower() in ENTITY_KEYS), None)
 
@@ -102,7 +114,7 @@ def _profile_table(conn, full: str, target: str, rows: int) -> dict:
             if c.type_name in ("text", "ntext") or c.max_length == -1:
                 expr = f"CAST({expr} AS nvarchar(400))"
             parts.append(f"COUNT({expr}) AS n{j}, COUNT(DISTINCT {expr}) AS d{j}")
-        row = conn.execute(sa.text(f"SELECT {', '.join(parts)} FROM {target}")).one()
+        row = conn.execute(sa.text(f"SELECT {', '.join(parts)} FROM {source}")).one()
         for j, c in enumerate(usable):
             stats[c.name] = (row[2 * j], row[2 * j + 1])
 
@@ -121,7 +133,7 @@ def _profile_table(conn, full: str, target: str, rows: int) -> dict:
             continue
         filled, distinct = stats.get(c.name, (0, 0))
         entry["filled"] = filled
-        entry["filled_pct"] = round(filled * 100 / rows, 1) if rows else 0
+        entry["filled_pct"] = round(filled * 100 / base_rows, 1) if base_rows else 0
         entry["distinct"] = distinct
         j = [u.name for u in usable].index(c.name)
         values = [r[j] for r in sample if r[j] is not None and str(r[j]).strip() != ""]
@@ -137,7 +149,7 @@ def _profile_table(conn, full: str, target: str, rows: int) -> dict:
                 and c.type_name in TEXT_TYPES | {"int", "smallint", "tinyint", "bit", "bigint"}):
             top = conn.execute(sa.text(
                 f"SELECT TOP {MAX_PICKLIST} LEFT(CAST({_quote(c.name)} AS nvarchar(400)), 50) AS v, "
-                f"COUNT(*) AS n FROM {target} WHERE {_quote(c.name)} IS NOT NULL "
+                f"COUNT(*) AS n FROM {source} WHERE {_quote(c.name)} IS NOT NULL "
                 f"GROUP BY LEFT(CAST({_quote(c.name)} AS nvarchar(400)), 50) ORDER BY n DESC")).all()
             entry["values"] = [f"{r.v} ({r.n})" for r in top]
         info["columns"].append(entry)
@@ -148,7 +160,7 @@ def _write_xlsx(path: Path, tables: list[dict]) -> None:
     wb = xlsxwriter.Workbook(str(path), {"strings_to_formulas": False, "strings_to_urls": False})
     bold = wb.add_format({"bold": True, "bg_color": "#DDEBF7", "border": 1})
     ts = wb.add_worksheet("Tables")
-    head = ["Table", "Rows", "Columns", "Links to client by", "Error"]
+    head = ["Table", "Rows", "Columns", "Links to client by", "Error", "Stats from"]
     for c, h in enumerate(head):
         ts.write(0, c, h, bold)
     for r, t in enumerate(tables, 1):
@@ -157,6 +169,8 @@ def _write_xlsx(path: Path, tables: list[dict]) -> None:
         ts.write(r, 2, len(t["columns"]))
         ts.write(r, 3, t.get("links_to_client_by") or "")
         ts.write(r, 4, t.get("error") or "")
+        ts.write(r, 5, f"first {t['stats_sampled_rows']:,} rows" if t.get("stats_sampled_rows")
+                 else "all rows")
     ts.set_column(0, 0, 45)
     ts.set_column(3, 4, 22)
     ts.autofilter(0, 0, len(tables), len(head) - 1)
