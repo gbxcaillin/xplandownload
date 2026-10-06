@@ -60,6 +60,9 @@ ROLE_TABLES = [  # table, person/company id column, Brightly role
     ("ufield_entity_beneficiary", "beneficiary_entityid", "Beneficiary"),
     ("ufield_entity_settlor", "settlor_entityid", "Settlor"),
 ]
+RELATION_ROLES = {"trustee": "Trustee", "director": "Director", "super": "Member",
+                  "member": "Member", "beneficiary": "Beneficiary", "shareholder": "Shareholder",
+                  "appointor": "Appointor", "settlor": "Settlor"}
 TECHNICAL = {"index", "eidobj", "_parentproc_dumplog", "dumplogcsv", "id", "guid", "verid",
              "listitemid", "created_at", "created_by", "modified_at", "modified_by",
              "modifiedby", "modifiedstamp", "createdstamp", "values_last_updated",
@@ -70,6 +73,12 @@ TECHNICAL = {"index", "eidobj", "_parentproc_dumplog", "dumplogcsv", "id", "guid
 # --------------------------------------------------------------------------
 # Database access
 # --------------------------------------------------------------------------
+
+def tfn_like_sql(column: str) -> str:
+    """SQL condition: the column holds something shaped like a TFN (8-9 digits only)."""
+    v = f"REPLACE(REPLACE(LTRIM(RTRIM(CAST([{column}] AS nvarchar(50)))), ' ', ''), '-', '')"
+    return f"(LEN({v}) BETWEEN 8 AND 9 AND {v} NOT LIKE '%[^0-9]%')"
+
 
 def qname(table: str) -> str:
     schema, _, name = table.rpartition(".")
@@ -310,6 +319,7 @@ class XplanData:
         progress("Loading SMSF / trust / company roles ...")
         self.roles = self._load_roles()
         self.ins_renewal = self._load_insurance_renewals()
+        self.relations = self._load_relations()
 
     # -- generic ----------------------------------------------------------
     def _use(self, table: str, *cols: str) -> None:
@@ -360,8 +370,7 @@ class XplanData:
                     self.tfn_columns.append((t, actual))
                     if t in chunks and "eidobj" in self.db.columns(t):
                         cur = self.db.conn.cursor()
-                        cur.execute(f"SELECT eidobj FROM {qname(t)} WHERE "
-                                    f"LEN(LTRIM(CAST([{actual}] AS nvarchar(50)))) > 0")
+                        cur.execute(f"SELECT eidobj FROM {qname(t)} WHERE {tfn_like_sql(actual)}")
                         for (eid,) in cur.fetchall():
                             self.tfn_held[int(eid)] = True
         return ents
@@ -478,6 +487,18 @@ class XplanData:
                 if r["eidobj"] is not None and r[col] is not None:
                     roles[int(r["eidobj"])].append((int(r[col]), role, r))
         return roles
+
+    def _load_relations(self) -> dict[int, list[tuple[int, str]]]:
+        """General Xplan relationships: entity -> [(other entity, label)], both directions."""
+        out: dict[int, list[tuple[int, str]]] = defaultdict(list)
+        self._use("relation_clientrelating", "subjectid", "objectid", "client_rel")
+        for r in self.db.rows("relation_clientrelating", ["subjectid", "objectid", "client_rel"]):
+            if r["subjectid"] and r["objectid"]:
+                label = clean_text(r["client_rel"]) or ""
+                a, b = int(r["subjectid"]), int(r["objectid"])
+                out[a].append((b, label))
+                out[b].append((a, label))
+        return out
 
     def _load_insurance_renewals(self) -> dict[int, list[Any]]:
         out: dict[int, list[Any]] = defaultdict(list)
@@ -999,6 +1020,16 @@ class BrightlyBuilder:
                 bal = clean_number(row.get("fund_balance")) if role == "Member" else None
                 self._add_role(roles, person_id, role, bal)
             if not roles:
+                # Fallback: Xplan's general relationship list (Trustee, Director, Super ...)
+                for other, label in d.relations.get(eid, []):
+                    if other in self.person_home:
+                        role = RELATION_ROLES.get(label.lower(), "Associated")
+                        if role == "Associated":
+                            self.counts["relationship_role_unclear"] += 1
+                        self._add_role(roles, other, role)
+                if roles:
+                    self.counts["entities_linked_by_relationship"] += 1
+            if not roles:
                 self.counts["entities_without_household_roles"] += 1
                 continue
             role_list = sorted(roles.values(), key=lambda r: (r["c"], r["pk"]))
@@ -1230,16 +1261,24 @@ def unmapped_inventory(data: XplanData, progress: Progress) -> list[Unmapped]:
                                                           "sql_variant")]
         if not ok:
             continue
-        parts = [f"SUM(CASE WHEN NULLIF(LTRIM(CAST([{c}] AS nvarchar(100))), '') IS NOT NULL "
-                 f"AND CAST([{c}] AS nvarchar(100)) NOT IN ('0', '0.0', 'False', '[]', '-1') "
-                 f"THEN 1 ELSE 0 END)" for c in ok]
+        parts = []
+        for c in ok:
+            v = f"CAST([{c}] AS nvarchar(100))"
+            parts.append(f"SUM(CASE WHEN NULLIF(LTRIM({v}), '') IS NOT NULL AND {v} NOT IN "
+                         f"('0', '0.0', 'False', '[]', '-1') THEN 1 ELSE 0 END)")
+            parts.append(f"COUNT(DISTINCT {v})")
         try:
-            counts = db.conn.cursor().execute(
-                f"SELECT {', '.join(parts)} FROM {qname(t)}").fetchone()
+            row = db.conn.cursor().execute(
+                f"SELECT COUNT(*), {', '.join(parts)} FROM {qname(t)}").fetchone()
         except Exception as exc:
             progress(f"  (skipped {t}: {str(exc).splitlines()[0][:80]})")
             continue
-        for c, n in zip(ok, counts):
-            if n:
-                out.append(Unmapped(t, c, int(n), suggest(t, c), "not mapped"))
+        total = row[0]
+        for i, c in enumerate(ok):
+            n, distinct = row[1 + 2 * i], row[2 + 2 * i]
+            if not n:
+                continue
+            if distinct == 1 and n == total and total > 1:
+                continue  # the same default on every record: nobody filled it in
+            out.append(Unmapped(t, c, int(n), suggest(t, c), "not mapped"))
     return out

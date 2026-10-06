@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from . import ExportWriter, Schema, Unmapped
 from .xplan_map import (BrightlyBuilder, XplanData, XplanDb, build_notes, build_tasks, qname,
-                        unmapped_inventory)
+                        tfn_like_sql, unmapped_inventory)
 
 Progress = Callable[[str], None]
 TOOL_DIR = Path(__file__).resolve().parents[2]
@@ -111,8 +111,7 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
         writer.sensitive_values = builder.sensitive
         cur = conn.cursor()
         for t, col in data.tfn_columns:
-            cur.execute(f"SELECT COUNT(*) FROM {qname(t)} "
-                        f"WHERE LEN(LTRIM(CAST([{col}] AS nvarchar(50)))) > 0")
+            cur.execute(f"SELECT COUNT(*) FROM {qname(t)} WHERE {tfn_like_sql(col)}")
             writer.tfn_fields_dropped += int(cur.fetchone()[0])
         manifest = writer.close(_readme(builder, writer, sample, wanted))
         manifest["sample"] = bool(sample)
@@ -165,6 +164,8 @@ Record counts, TFN and sensitive-field counts are in `manifest.json`.
 - SMSF trustee type text used: "Individual trustees" / "Corporate trustee" — check these match Brightly's options.
 - fee taken from last-12-month FDS receipts for {c.get('fee_from_fds', 0)} household(s).
 - Roles for people who aren't in any household were skipped ({c.get('roles_for_people_without_household', 0)}); structures with no household role skipped ({c.get('entities_without_household_roles', 0)}).
+- {c.get('entities_linked_by_relationship', 0)} structure(s) had no trustee/director/member list and were linked through Xplan's general relationships instead (Trustee, Director, Super → Member ...); {c.get('relationship_role_unclear', 0)} link(s) had a label with no clear role (e.g. "Company", "Trust", "Family") and are shown as role "Associated".
+- TFN removal in text uses the ATO check digit; an unrelated 8–9 digit number (e.g. some account numbers) can pass it by chance and is also removed (Brightly would refuse it anyway).
 - Aborted tasks left out: {c.get('tasks_aborted_skipped', 0)}.
 - Signed documents other than ATP (OFA consent, fee consent "Consent Form" notes, ID checks in `sections_identitycheck`) need Brightly's doc keys before they can be mapped.
 - File note text comes across as written in Xplan. Some notes may mention health details; they have not been altered.
