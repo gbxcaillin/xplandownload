@@ -118,3 +118,16 @@ def test_unknown_host_key_refused(server):
     with pytest.raises(sftp.SftpError, match="not yet trusted"):
         sftp.download("127.0.0.1", port, USER, PASSWORD, tmp / "dl",
                       known_hosts=tmp / "known_hosts", progress=lambda m: None)
+
+
+def test_resume_partial_download(server):
+    port, _, tmp = server
+    data = (tmp / "remote" / "extract.zip").read_bytes()
+    (tmp / "dl").mkdir()
+    (tmp / "dl" / "extract.zip.partial").write_bytes(data[:30_000])
+    messages = []
+    files = sftp.download("127.0.0.1", port, USER, PASSWORD, tmp / "dl",
+                          known_hosts=tmp / "known_hosts", accept_new_host_key=True,
+                          progress=messages.append)
+    assert files[0].read_bytes() == data
+    assert any("resuming" in m for m in messages)

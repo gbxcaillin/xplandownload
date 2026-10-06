@@ -43,3 +43,11 @@ def test_zip_slip_rejected(tmp_path):
     make_zip(zp, {"../escape.bak": b"x"})
     with pytest.raises(ArchiveError, match="unsafe"):
         extract_zip(zp, tmp_path / "out", PASSWORD, progress=lambda m: None)
+
+
+def test_not_enough_space(tmp_path, monkeypatch):
+    zp = tmp_path / "extract.zip"
+    make_zip(zp, {"a.bak": b"data"})
+    monkeypatch.setattr("shutil.disk_usage", lambda p: type("U", (), {"free": 1024})())
+    with pytest.raises(ArchiveError, match="Not enough disk space"):
+        extract_zip(zp, tmp_path / "out", PASSWORD, progress=lambda m: None)

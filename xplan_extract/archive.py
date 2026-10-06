@@ -40,6 +40,7 @@ def extract_zip(
     with zf:
         if pwd:
             zf.setpassword(pwd)
+        _check_free_space(zf, dest_root, overwrite)
         for info in zf.infolist():
             if info.is_dir():
                 continue
@@ -76,6 +77,31 @@ def extract_zip(
             else:
                 extracted.append(target)
     return extracted
+
+
+def _check_free_space(zf, dest_root: Path, overwrite: bool) -> None:
+    needed = 0
+    for info in zf.infolist():
+        target = dest_root / info.filename
+        if info.is_dir() or (target.exists() and target.stat().st_size == info.file_size
+                             and not overwrite):
+            continue
+        needed += info.file_size
+    free = shutil.disk_usage(dest_root).free
+    margin = 2 * 1024 ** 3  # leave 2 GB for the system
+    if needed + margin > free:
+        gb = 1024 ** 3
+        raise ArchiveError(
+            f"Not enough disk space to extract: needs {needed / gb:,.1f} GB (+2 GB spare) but "
+            f"only {free / gb:,.1f} GB is free in {dest_root}. Free up space, or extract to "
+            "another drive with --extract-dir (e.g. --extract-dir D:\\SQLBackups)."
+        )
+
+
+def list_contents(zip_path: Path) -> list[tuple[str, int]]:
+    """Names and uncompressed sizes (no password needed)."""
+    with pyzipper.AESZipFile(zip_path) as zf:
+        return [(i.filename, i.file_size) for i in zf.infolist() if not i.is_dir()]
 
 
 def find_backups(files: list[Path]) -> list[Path]:

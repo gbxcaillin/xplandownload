@@ -7,12 +7,14 @@ import fnmatch
 import hashlib
 import posixpath
 import stat
+import time
 from pathlib import Path
 from typing import Callable
 
 import paramiko
 
 Progress = Callable[[str], None]
+CHUNK = 1024 * 1024
 
 
 class SftpError(Exception):
@@ -44,6 +46,51 @@ class _HostKeyPolicy(paramiko.MissingHostKeyPolicy):
         self.known_hosts.parent.mkdir(parents=True, exist_ok=True)
         client.save_host_keys(str(self.known_hosts))
         self.progress(f"Trusted new host key for {hostname}: {key.get_name()} {fp}")
+
+
+def _fmt_size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n)} B"
+        n /= 1024
+    return str(n)
+
+
+def _fetch(sftp: paramiko.SFTPClient, remote: str, partial: Path, total: int, label: str,
+           progress: Progress, report_every: float = 30.0) -> None:
+    """Download ``remote`` into ``partial``, resuming from what is already there."""
+    start = partial.stat().st_size if partial.exists() else 0
+    if start > total:
+        partial.unlink()
+        start = 0
+    if start:
+        progress(f"  resuming from {_fmt_size(start)} already downloaded")
+    done = start
+    began = last = time.monotonic()
+    with sftp.open(remote, "rb") as src, open(partial, "ab") as dst:
+        src.seek(start)
+        src.prefetch(total - start, max_concurrent_requests=64)
+        while done < total:
+            chunk = src.read(CHUNK)
+            if not chunk:
+                break
+            dst.write(chunk)
+            done += len(chunk)
+            now = time.monotonic()
+            if now - last >= report_every or done >= total:
+                last = now
+                rate = (done - start) / max(now - began, 1e-6)
+                eta = (total - done) / rate if rate else 0
+                progress(f"  {label}: {done * 100 / total:5.1f}%  {_fmt_size(done)} of "
+                         f"{_fmt_size(total)}  {_fmt_size(rate)}/s  "
+                         f"about {_fmt_duration(eta)} left")
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h {m:02d}m" if h else f"{m}m {s:02d}s"
 
 
 def download(
@@ -108,20 +155,14 @@ def download(
                 downloaded.append(local)
                 continue
             partial = local.with_name(local.name + ".partial")
-            last = [-1]
-
-            def report(done: int, total: int) -> None:
-                pct = int(done * 100 / total) if total else 100
-                if pct >= last[0] + 10 or done == total:
-                    last[0] = pct
-                    progress(f"  {entry.filename}: {pct}% ({done:,}/{total:,} bytes)")
-
+            if overwrite:
+                partial.unlink(missing_ok=True)
             progress(f"Downloading {remote} -> {local}")
-            sftp.get(remote, str(partial), callback=report)
+            _fetch(sftp, remote, partial, entry.st_size or 0, entry.filename, progress)
             size = partial.stat().st_size
             if entry.st_size is not None and size != entry.st_size:
-                raise SftpError(f"Size mismatch for {entry.filename}: got {size}, "
-                                f"expected {entry.st_size}")
+                raise SftpError(f"Size mismatch for {entry.filename}: got {size:,}, "
+                                f"expected {entry.st_size:,}. Run the command again to resume.")
             partial.replace(local)
             downloaded.append(local)
     finally:

@@ -203,6 +203,15 @@ def cmd_unzip(a) -> None:
         log(f"Extracted: {p}")
 
 
+def cmd_info(a) -> None:
+    total = 0
+    for name, size in archive.list_contents(a.zip):
+        total += size
+        log(f"  {name}: {size / 1024 ** 3:,.2f} GB")
+    log(f"Zip file: {a.zip.stat().st_size / 1024 ** 3:,.2f} GB; "
+        f"unzipped total: {total / 1024 ** 3:,.2f} GB")
+
+
 def cmd_restore(a) -> None:
     step_restore(a.bak, a)
 
@@ -279,6 +288,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("unzip", help="Extract the password-protected zip.")
     p.add_argument("zip", type=Path); add_zip_args(p); dirs(p)
     p.set_defaults(func=cmd_unzip)
+
+    p = sub.add_parser("info", help="Show what is inside a zip and how big it is unzipped.")
+    p.add_argument("zip", type=Path)
+    p.set_defaults(func=cmd_info)
 
     p = sub.add_parser("restore", help="Restore a .bak file into SQL Server.")
     p.add_argument("bak", type=Path); add_sql_args(p); add_restore_args(p)
