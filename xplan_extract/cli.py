@@ -246,6 +246,37 @@ def pick_database(a) -> str:
                      + (", ".join(names) or "none (restore the backup first)"))
 
 
+def cmd_documents(a) -> None:
+    from . import documents
+
+    if not a.dest:
+        raise SystemExit("Pass --dest FOLDER (or set DOCUMENTS_DEST in .env), e.g. your synced "
+                         "SharePoint folder.")
+    if a.limit and not 0 < a.limit <= 2000:
+        raise SystemExit("--limit must be between 1 and 2000.")
+    db = pick_database(a)
+    opts = documents.DocOptions(
+        dest=Path(a.dest), dry_run=a.dry_run, limit=a.limit, min_free_gb=a.min_free_gb,
+        include_notes=not a.no_notes, include_other=not a.no_other,
+        online_only=not a.keep_local, entity_table=a.entity_table, entity_key=a.entity_key,
+        entity_name=a.entity_name,
+    )
+    log(("DRY RUN - nothing will be written. " if a.dry_run else "") + f"Destination: {opts.dest}")
+    stats = documents.export_documents(sql_config(a).engine(db), opts, progress=log)
+    log("")
+    verb = "Would save" if a.dry_run else "Saved"
+    log(f"{verb} {stats.files:,} file(s), {stats.bytes_written / 1024 ** 3:,.1f} GB "
+        f"({stats.notes:,} file notes); {stats.skipped_existing:,} were already there.")
+    if stats.no_client:
+        log(f"  {stats.no_client:,} file notes have no client -> Clients\\_No client")
+    if stats.unlinked_parts:
+        log(f"  {stats.unlinked_parts:,} attached files have no file note -> Clients\\_Unlinked files")
+    if stats.long_paths:
+        log(f"  {stats.long_paths:,} paths are longer than 255 characters")
+    if stats.errors:
+        log(f"  {len(stats.errors):,} file(s) could not be saved, e.g. {stats.errors[0]}")
+
+
 def cmd_describe(a) -> None:
     db = pick_database(a)
     sqlserver.describe_tables(sql_config(a).engine(db), a.patterns, progress=log)
@@ -353,6 +384,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check-only", action="store_true",
                    help="Only show how much space the restore needs; don't restore.")
     p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("documents", help="Save the stored documents as files, one folder "
+                                         "per client (e.g. into a synced SharePoint folder).")
+    p.add_argument("--dest", default=env("DOCUMENTS_DEST"), help="Destination folder.")
+    p.add_argument("--dry-run", action="store_true", help="Only count; write nothing.")
+    p.add_argument("--limit", type=int, help="Trial run: only the first N file notes.")
+    p.add_argument("--min-free-gb", type=float, default=10.0,
+                   help="Pause while free disk space is below this (default 10).")
+    p.add_argument("--no-notes", action="store_true", help="Don't save file note text.")
+    p.add_argument("--no-other", action="store_true", help="Skip _attachmentdata files.")
+    p.add_argument("--keep-local", action="store_true",
+                   help="Don't mark files online-only for OneDrive.")
+    p.add_argument("--entity-table", help="Table with client names (auto-detected).")
+    p.add_argument("--entity-key", help="Client id column in that table.")
+    p.add_argument("--entity-name", help="SQL expression for the client name.")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_documents)
 
     p = sub.add_parser("describe", help="Show the columns of some tables and what files "
                                         "their binary columns hold (no client data).")

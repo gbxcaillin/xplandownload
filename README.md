@@ -87,6 +87,24 @@ saves the full list to `output/tables_<database>.csv`. Use it to choose what to 
 python -m xplan_extract export --no-binary --exclude "*audit*" --exclude "*log*"
 ```
 
+### Stored documents (PDFs, Word, emails …) to a folder / SharePoint
+
+```
+python -m xplan_extract documents --dest "C:\Users\me\Company\Team Files - General\XPlan Files" --dry-run
+python -m xplan_extract documents --dest "..." --limit 20      # trial: first 20 file notes
+python -m xplan_extract documents --dest "..."                 # everything
+```
+
+Writes `Clients/<Client name> (<id>)/<date> <type> - <file>` for every attached file, an
+`.html` copy of each file note (date, type, subject, clients, note text, links to its
+attachments), `Other attachments/…` for `_attachmentdata`, and `documents_index.csv` listing
+everything. A note linked to several clients is saved in the first client's folder; the
+others are listed in the note and the index.
+
+For a OneDrive-synced SharePoint folder (Files On-Demand on), each file is marked
+online-only so OneDrive frees the local copy after uploading, and the export pauses while
+free disk space is below `--min-free-gb` (default 10). Re-running skips files already saved.
+
 ### Individual steps
 
 ```
