@@ -1,0 +1,20 @@
+{
+  "version": "test schema (made up for tests)",
+  "repeat": {"fund": {"label": "Fund", "max": 5}},
+  "fields": [
+    {"id": "marital", "type": "select", "scope": "shared", "options": ["Single", "Married", "De facto"]},
+    {"id": "dob", "type": "date", "scope": "person"},
+    {"id": "homeValue", "type": "money", "scope": "shared",
+     "owner": {"id": "owner", "options": ["Person 1", "Person 2", "Joint"]}},
+    {"id": "balance", "type": "money", "scope": "shared", "repeat": "fund"},
+    {"id": "smoker12m", "type": "yesno", "scope": "person", "options": ["Yes", "No"], "sensitive": true}
+  ],
+  "riskProfile": {
+    "scope": "person",
+    "questions": [{"id": "rp1", "type": "longtext"}],
+    "decision": {"id": "riskProfile", "type": "select",
+                 "options": ["Conservative", "Moderate", "Balanced", "Growth", "High Growth"]},
+    "household": {"id": "riskProfileJoint", "type": "select",
+                  "options": ["Conservative", "Moderate", "Balanced", "Growth", "High Growth"]}
+  }
+}
