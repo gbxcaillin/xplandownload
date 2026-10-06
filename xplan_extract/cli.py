@@ -246,6 +246,11 @@ def pick_database(a) -> str:
                      + (", ".join(names) or "none (restore the backup first)"))
 
 
+def cmd_describe(a) -> None:
+    db = pick_database(a)
+    sqlserver.describe_tables(sql_config(a).engine(db), a.patterns, progress=log)
+
+
 def cmd_tables(a) -> None:
     import csv
 
@@ -348,6 +353,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check-only", action="store_true",
                    help="Only show how much space the restore needs; don't restore.")
     p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("describe", help="Show the columns of some tables and what files "
+                                        "their binary columns hold (no client data).")
+    p.add_argument("patterns", nargs="+", help="Table names, wildcards allowed (e.g. *doc*).")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_describe)
 
     p = sub.add_parser("tables", help="List the restored tables with row counts and sizes.")
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")

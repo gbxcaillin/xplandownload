@@ -122,6 +122,107 @@ def table_sizes(engine: sa.Engine) -> list[dict]:
         return [dict(r._mapping) for r in conn.execute(sql)]
 
 
+FILE_SIGNATURES = [
+    (b"%PDF", "PDF"),
+    (b"PK\x03\x04", "ZIP / Office 2007+ (docx, xlsx, pptx)"),
+    (b"\xd0\xcf\x11\xe0", "Office 97-2003 (doc, xls, msg)"),
+    (b"\xff\xd8\xff", "JPEG"),
+    (b"\x89PNG", "PNG"),
+    (b"GIF8", "GIF"),
+    (b"II*\x00", "TIFF"),
+    (b"MM\x00*", "TIFF"),
+    (b"{\\rtf", "RTF"),
+    (b"\x1f\x8b", "GZIP-compressed"),
+    (b"\x78\x9c", "zlib-compressed"),
+    (b"\x78\xda", "zlib-compressed"),
+    (b"\x78\x01", "zlib-compressed"),
+    (b"BZh", "BZIP2-compressed"),
+    (b"\xef\xbb\xbf", "UTF-8 text"),
+    (b"\xff\xfe", "UTF-16 text"),
+    (b"<", "HTML / XML"),
+]
+
+_DESCRIBE_VALUE_HINTS = ("ext", "mime", "type", "format", "kind")
+
+
+def file_kind(head: bytes | None) -> str:
+    if not head:
+        return "(empty)"
+    for sig, name in FILE_SIGNATURES:
+        if head.startswith(sig):
+            return name
+    if all(32 <= b < 127 or b in (9, 10, 13) for b in head):
+        return "plain text"
+    return "unknown (starts " + head[:4].hex(" ").upper() + ")"
+
+
+def describe_tables(engine: sa.Engine, patterns: list[str], progress: Progress = print,
+                    sample_rows: int = 300) -> None:
+    """Column layout of matching tables, plus what kind of files binary columns hold.
+
+    Prints no row values except short values of type/extension-like columns.
+    """
+    import fnmatch
+    from collections import Counter
+
+    sizes = {f"{r['schema_name']}.{r['table_name']}": r for r in table_sizes(engine)}
+    names = [n for n in sizes if any(
+        fnmatch.fnmatchcase(n.lower(), p.lower()) or
+        fnmatch.fnmatchcase(n.split(".", 1)[1].lower(), p.lower()) for p in patterns)]
+    if not names:
+        progress("No tables match " + ", ".join(patterns))
+        return
+    prep = engine.dialect.identifier_preparer
+    with engine.connect() as conn:
+        for full in sorted(names):
+            info = sizes[full]
+            schema, table = full.split(".", 1)
+            target = f"{prep.quote_schema(schema)}.{prep.quote(table)}"
+            progress("")
+            progress(f"== {full}: {info['row_count']:,} rows, {float(info['size_mb']):,.1f} MB")
+            cols = conn.execute(sa.text("""
+                SELECT c.name, t.name AS type_name, c.max_length, c.is_nullable,
+                       CASE WHEN EXISTS (SELECT 1 FROM sys.index_columns ic
+                             JOIN sys.indexes i ON i.object_id = ic.object_id
+                                               AND i.index_id = ic.index_id
+                             WHERE i.is_primary_key = 1 AND ic.object_id = c.object_id
+                               AND ic.column_id = c.column_id) THEN 1 ELSE 0 END AS is_pk
+                FROM sys.columns c JOIN sys.types t ON t.user_type_id = c.user_type_id
+                WHERE c.object_id = OBJECT_ID(:obj) ORDER BY c.column_id
+            """), {"obj": target}).all()
+            for c in cols:
+                length = "" if c.max_length in (None, 0) else (
+                    "(max)" if c.max_length == -1 else f"({c.max_length})")
+                flags = " PK" if c.is_pk else ""
+                progress(f"   {c.name:<40} {c.type_name}{length}{flags}")
+
+            for c in cols:
+                col = prep.quote(c.name)
+                if c.type_name in ("varbinary", "binary", "image"):
+                    rows = conn.execute(sa.text(
+                        f"SELECT TOP {int(sample_rows)} CAST(SUBSTRING({col}, 1, 16) AS varbinary(16)), "
+                        f"DATALENGTH({col}) FROM {target} WHERE {col} IS NOT NULL")).all()
+                    kinds = Counter(file_kind(bytes(r[0]) if r[0] is not None else None)
+                                    for r in rows)
+                    stats = conn.execute(sa.text(
+                        f"SELECT COUNT(*), AVG(CAST(DATALENGTH({col}) AS float)), "
+                        f"MAX(DATALENGTH({col})) FROM {target} WHERE {col} IS NOT NULL")).one()
+                    progress(f"   -> {c.name}: {stats[0]:,} non-empty, average "
+                             f"{(stats[1] or 0) / 1024:,.0f} KB, largest "
+                             f"{(stats[2] or 0) / 1024 ** 2:,.1f} MB")
+                    for kind, n in kinds.most_common(8):
+                        progress(f"        {kind}: {n} of first {len(rows)}")
+                elif (any(h in c.name.lower() for h in _DESCRIBE_VALUE_HINTS)
+                      and c.type_name in ("varchar", "nvarchar", "char", "nchar", "int",
+                                          "smallint", "tinyint")):
+                    rows = conn.execute(sa.text(
+                        f"SELECT TOP 10 LEFT(CAST({col} AS nvarchar(100)), 30) AS v, COUNT(*) AS n "
+                        f"FROM {target} GROUP BY LEFT(CAST({col} AS nvarchar(100)), 30) "
+                        f"ORDER BY n DESC")).all()
+                    shown = ", ".join(f"{r.v!s}: {r.n:,}" for r in rows)
+                    progress(f"   -> {c.name} most common values: {shown}")
+
+
 # --------------------------------------------------------------------------
 # Restore
 # --------------------------------------------------------------------------
