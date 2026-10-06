@@ -29,3 +29,19 @@ def test_read_active_list(tmp_path):
 
 def test_norm_name():
     assert norm_name("Citizen, Jane") == norm_name("Mrs Jane Citizen") == "citizen jane"
+
+
+def test_name_variants_and_loose():
+    from xplan_extract.brightly.active import loose_name, name_variants
+    v = name_variants("Citizen, Jane & Sam")
+    assert "Jane Citizen" in v and "Sam Citizen" in v
+    v = name_variants("Jane & Sam Citizen")
+    assert "Jane Citizen" in v and "Sam Citizen" in v
+    v = name_variants("Example Pty Ltd ATF Example Family Trust")
+    assert "Example Pty Ltd" in v and "Example Family Trust" in v
+    assert loose_name("Example Super Fund Pty Ltd") == loose_name("EXAMPLE SMSF") == "example"
+
+
+def test_excel_numbers(tmp_path):
+    from xplan_extract.brightly.active import _cell
+    assert _cell(12345.0) == "12345" and _cell(1.5) == "1.5" and _cell(None) == ""

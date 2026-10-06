@@ -236,7 +236,7 @@ def money(value: Any) -> int | float | None:
 
 ENTITY_FIELDS = [
     "entity_id", "entity_name", "entity_type", "first_name", "middle_name", "last_name",
-    "title", "dob", "marital_status", "jobtitle", "occupation",
+    "preferred_name", "title", "dob", "marital_status", "jobtitle", "occupation",
     "employer", "emp_status", "country_of_birth", "partner_entity_id", "client_adviser",
     "client_active_date", "create_date", "company_name", "company_number",
     "abn", "accountant", "superfund_name", "superfund_number", "trust_name",

@@ -18,6 +18,8 @@ from pathlib import Path
 
 import openpyxl
 
+from . import clean_text
+
 HEADINGS = {"policy number": "policy", "client no": "client_no", "client / owner": "owner",
             "crm reference": "crm", "transaction no": "txn"}
 
@@ -33,8 +35,20 @@ class ListedClient:
     method: str = ""
 
 
+def _cell(value) -> str:
+    """Excel stores 12345 as 12345.0 - give the number back as written."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip() if value is not None else ""
+
+
 def _norm_policy(value) -> str:
     return re.sub(r"[\s\-/]", "", str(value or "")).upper().lstrip("0")
+
+
+NOISE_WORDS = {"mr", "mrs", "ms", "miss", "dr", "prof", "the", "pty", "ltd", "limited", "p", "l",
+               "superannuation", "super", "fund", "smsf", "trust", "trustee", "trustees",
+               "as", "for", "atf", "a", "t", "f", "family", "investments", "investment"}
 
 
 def norm_name(value) -> str:
@@ -48,6 +62,34 @@ def norm_name(value) -> str:
     return " ".join(sorted(words))
 
 
+def loose_name(value) -> str:
+    """Like norm_name but also ignoring Pty Ltd, Super Fund, ATF, Trust ... wording."""
+    return " ".join(w for w in norm_name(value).split() if w not in NOISE_WORDS)
+
+
+def name_variants(value) -> list[str]:
+    """A fee-report name and the people/structures it may stand for.
+
+    "Citizen, Jane & Sam" -> "Citizen, Jane & Sam", "Jane Citizen", "Sam Citizen";
+    "Smith Pty Ltd ATF Smith Family Trust" -> also each side of ATF.
+    """
+    text = str(value or "").strip()
+    out = [text]
+    for part in re.split(r"\s+(?:atf|a/t/f|as trustee for|itf)\s+", text, flags=re.I):
+        if part and part != text:
+            out.append(part)
+    if "," in text:
+        last, _, firsts = text.partition(",")
+        for first in re.split(r"\s*(?:&|\band\b|/)\s*", firsts):
+            if first.strip():
+                out.append(f"{first.strip()} {last.strip()}")
+    else:
+        m = re.match(r"^(.+?)\s*(?:&|\band\b)\s*(.+?)\s+(\S+)$", text)
+        if m:  # "Jane & Sam Citizen"
+            out += [f"{m.group(1)} {m.group(3)}", f"{m.group(2)} {m.group(3)}"]
+    return out
+
+
 def read_active_list(path: Path) -> list[ListedClient]:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     clients: list[ListedClient] = []
@@ -55,7 +97,7 @@ def read_active_list(path: Path) -> list[ListedClient]:
         cols: dict[str, int] = {}
         current: ListedClient | None = None
         for row in ws.iter_rows(values_only=True):
-            cells = [str(c).strip() if c is not None else "" for c in row]
+            cells = [_cell(c) for c in row]
             if not cols:
                 found = {HEADINGS[re.sub(r"\s+", " ", c).lower()]: i
                          for i, c in enumerate(cells)
@@ -97,15 +139,27 @@ def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str
                 by_policy.setdefault(p, set()).add(eid)
 
     by_name: dict[str, set[str]] = {}
+    by_loose: dict[str, set[str]] = {}
+
+    def index(name, hid, structure=False):
+        if name:
+            by_name.setdefault(norm_name(name), set()).add(hid)
+            # loose matching (ignoring Pty Ltd / ATF / Fund wording) only for structures
+            if structure and loose_name(name):
+                by_loose.setdefault(loose_name(name), set()).add(hid)
+
     for hid, hh in builder.households.items():
         for p in hh.people:
-            for n in (p.name, p.f.get("entity_name")):
-                if n:
-                    by_name.setdefault(norm_name(n), set()).add(hid)
+            index(p.name, hid)
+            index(p.f.get("entity_name"), hid)
+            pref = clean_text(p.f.get("preferred_name"))
+            if pref and clean_text(p.f.get("last_name")):
+                index(f"{pref} {clean_text(p.f.get('last_name'))}", hid)
     for eid, hid in entity_home.items():
         e = d.entities.get(eid)
         if e:
-            by_name.setdefault(norm_name(e.name), set()).add(hid)
+            index(e.name, hid, structure=True)
+            index(e.f.get("entity_name"), hid, structure=True)
 
     active: set[str] = set()
     for c in listed:
@@ -117,10 +171,17 @@ def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str
             if homes:
                 c.method = "Policy Number"
         if not homes:
-            for n in [c.name, *c.owners]:
-                found = by_name.get(norm_name(n), set())
+            names = [v for n in [c.name, *c.owners] for v in name_variants(n)]
+            for lookup, label in ((by_name, "Name (unique match)"),
+                                  (by_loose, "Name, ignoring Pty Ltd/ATF/Fund wording")):
+                found: set[str] = set()
+                for n in names:
+                    key = norm_name(n) if lookup is by_name else loose_name(n)
+                    hit = lookup.get(key, set())
+                    if len(hit) == 1:
+                        found |= hit
                 if len(found) == 1:
-                    homes, c.method = set(found), "Name (unique match)"
+                    homes, c.method = found, label
                     break
         c.households = homes
         active |= homes
