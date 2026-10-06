@@ -489,6 +489,47 @@ def _note_html(note: Note, client_names: list[str], body: bytes | None,
             ).encode("utf-8")
 
 
+def shared_note_examples(engine: sa.Engine, count: int = 3, progress: Progress = print) -> None:
+    """Show how many file notes are linked to several clients, with a few recent examples."""
+    raw = engine.raw_connection()
+    conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
+    try:
+        entities = find_entity_names(conn)
+        notes = load_notes(conn)
+        cur = conn.cursor()
+        parts: dict[str, int] = {}
+        for docid, n in cur.execute(f"SELECT docid, COUNT(*) FROM {DOCPART} GROUP BY docid"):
+            parts[str(docid).strip()] = n
+    finally:
+        raw.close()
+
+    shared = [n for n in notes.values() if len(set(n.entities)) > 1]
+    two = sum(1 for n in shared if len(set(n.entities)) == 2)
+    progress(f"{len(shared):,} of {len(notes):,} file notes are linked to more than one client "
+             f"({two:,} to two clients, {len(shared) - two:,} to three or more).")
+    by_type: dict[str, int] = {}
+    for n in shared:
+        by_type[n.type or "(no type)"] = by_type.get(n.type or "(no type)", 0) + 1
+    progress("Most common types: " + ", ".join(
+        f"{t}: {c:,}" for t, c in sorted(by_type.items(), key=lambda x: -x[1])[:6]))
+    progress("")
+    recent = sorted(shared, key=lambda n: n.date or dt.datetime.min, reverse=True)
+    picked, seen_types = [], set()
+    for n in recent:  # recent ones, of different types where possible
+        if n.type not in seen_types:
+            picked.append(n)
+            seen_types.add(n.type)
+        if len(picked) == count:
+            break
+    for i, n in enumerate(picked, 1):
+        date = n.date.strftime("%d/%m/%Y") if isinstance(n.date, dt.datetime) else "no date"
+        clients = "; ".join(f"{entities.names.get(e, 'Client')} ({e})"
+                            for e in dict.fromkeys(n.entities))
+        progress(f"Example {i}: {date}  {n.type or '(no type)'}  -  {n.subject or '(no subject)'}")
+        progress(f"   Clients: {clients}")
+        progress(f"   Attached files: {parts.get(n.docid, 0)}  (Xplan document id {n.docid})")
+
+
 def export_documents(engine: sa.Engine, opts: DocOptions, progress: Progress = print) -> Stats:
     raw = engine.raw_connection()
     conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
@@ -510,13 +551,17 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
     linked = sum(1 for n in notes.values() if n.entities)
     progress(f"File notes: {len(notes):,} ({linked:,} linked to a client)")
 
-    def client_folder(eids: list[int]) -> Path:
+    def client_folders(eids: list[int]) -> list[tuple[int | None, Path]]:
+        """Every linked client's folder: a note for a couple/trust goes in each of them."""
         if not eids:
-            return dest / "Clients" / "_No client"
-        eid = eids[0]
-        name = entities.names.get(eid)
-        label = f"{name} ({eid})" if name else f"Client {eid}"
-        return dest / "Clients" / safe_name(label, MAX_FOLDER_CHARS, f"Client {eid}")
+            return [(None, dest / "Clients" / "_No client")]
+        folders = []
+        for eid in dict.fromkeys(eids):
+            name = entities.names.get(eid)
+            label = f"{name} ({eid})" if name else f"Client {eid}"
+            folders.append((eid, dest / "Clients" / safe_name(label, MAX_FOLDER_CHARS,
+                                                               f"Client {eid}")))
+        return folders
 
     selected = sorted(notes)
     if opts.limit:
@@ -529,7 +574,7 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
     progress(f"Attached files: {total_parts:,}")
 
     index_rows: list[list] = []
-    attachments_by_note: dict[str, list[str]] = {}
+    attachments_by_note: dict[tuple[str, Path], list[str]] = {}
 
     # 1. Attached files, streamed one at a time (some are 100+ MB).
     progress("Saving attached files ...")
@@ -556,21 +601,22 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
         name = original + extension_for(original, mimetype, data[:16])
         if note is None:
             w.stats.unlinked_parts += 1
-            folder = dest / "Clients" / "_Unlinked files"
+            folders = [(None, dest / "Clients" / "_Unlinked files")]
             label = created.strftime("%Y-%m-%d") if isinstance(created, dt.datetime) else ""
         else:
-            folder = client_folder(note.entities)
+            folders = client_folders(note.entities)
             label = _note_label(note)
         file_name = safe_name(f"{label} - {name}" if label else name, MAX_FILE_CHARS, name)
-        try:
-            path = w.write(folder, file_name, str(partid), data, size)
-        except OSError as exc:
-            w.stats.errors.append(f"docpart {partid}: {exc}")
-            progress(f"  could not save docpart {partid}: {exc}")
-            continue
-        attachments_by_note.setdefault(docid, []).append(path.name)
-        index_rows.append(_index_row("attachment", note, entities, docid, partid, original,
-                                     mimetype, size, path, dest))
+        for eid, folder in folders:
+            try:
+                path = w.write(folder, file_name, str(partid), data, size)
+            except OSError as exc:
+                w.stats.errors.append(f"docpart {partid}: {exc}")
+                progress(f"  could not save docpart {partid}: {exc}")
+                continue
+            attachments_by_note.setdefault((docid, folder), []).append(path.name)
+            index_rows.append(_index_row("attachment", note, entities, eid, docid, partid,
+                                         original, mimetype, size, path, dest))
         w.report(done, total_parts)
     w.report(done, total_parts, force=True)
 
@@ -584,22 +630,23 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
             if docid not in wanted:
                 continue
             note = notes[docid]
-            folder = client_folder(note.entities)
             if not note.entities:
                 w.stats.no_client += 1
             names = [entities.names.get(e, f"Client {e}") for e in note.entities]
             title = note.subject or note.filename or note.subtype or "File note"
             file_name = safe_name(f"{_note_label(note)} - {title}", MAX_FILE_CHARS - 5,
                                   "File note") + ".html"
-            body = _note_html(note, names, data, attachments_by_note.get(docid, []))
-            try:
-                path = w.write(folder, file_name, docid, body)
-            except OSError as exc:
-                w.stats.errors.append(f"docnote {docid}: {exc}")
-                continue
             w.stats.notes += 1
-            index_rows.append(_index_row("file note", note, entities, docid, "", title,
-                                         note.mimetype, len(body), path, dest))
+            for eid, folder in client_folders(note.entities):
+                body = _note_html(note, names, data,
+                                  attachments_by_note.get((docid, folder), []))
+                try:
+                    path = w.write(folder, file_name, docid, body)
+                except OSError as exc:
+                    w.stats.errors.append(f"docnote {docid}: {exc}")
+                    continue
+                index_rows.append(_index_row("file note", note, entities, eid, docid, "",
+                                             title, note.mimetype, len(body), path, dest))
 
     # 3. Other attachments (not linked to a client in this extract).
     if opts.include_other and not opts.limit and _table_exists(conn, ATTACHMENTS):
@@ -636,13 +683,14 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
     return w.stats
 
 
-def _index_row(kind, note, entities, docid, partid, original, mimetype, size, path, dest):
+def _index_row(kind, note, entities, client, docid, partid, original, mimetype, size, path,
+               dest):
     eids = note.entities if note else []
     return [
         kind,
-        eids[0] if eids else "",
-        entities.names.get(eids[0], "") if eids else "",
-        ";".join(str(e) for e in eids[1:]),
+        client if client is not None else "",
+        entities.names.get(client, "") if client is not None else "",
+        ";".join(str(e) for e in eids if e != client),
         note.date.strftime("%Y-%m-%d") if note and isinstance(note.date, dt.datetime) else "",
         note.type if note else "",
         note.subtype if note else "",

@@ -249,6 +249,10 @@ def pick_database(a) -> str:
 def cmd_documents(a) -> None:
     from . import documents
 
+    if a.shared_examples:
+        from . import documents as docs
+        docs.shared_note_examples(sql_config(a).engine(pick_database(a)), a.shared_examples, log)
+        return
     if not a.dest:
         raise SystemExit("Pass --dest FOLDER (or set DOCUMENTS_DEST in .env), e.g. your synced "
                          "SharePoint folder.")
@@ -390,6 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dest", default=env("DOCUMENTS_DEST"), help="Destination folder.")
     p.add_argument("--dry-run", action="store_true", help="Only count; write nothing.")
     p.add_argument("--limit", type=int, help="Trial run: only the first N file notes.")
+    p.add_argument("--shared-examples", type=int, metavar="N",
+                   help="Only show N examples of notes linked to several clients.")
     p.add_argument("--min-free-gb", type=float, default=10.0,
                    help="Pause while free disk space is below this (default 10).")
     p.add_argument("--no-notes", action="store_true", help="Don't save file note text.")

@@ -98,8 +98,8 @@ python -m xplan_extract documents --dest "..."                 # everything
 Writes `Clients/<Client name> (<id>)/<date> <type> - <file>` for every attached file, an
 `.html` copy of each file note (date, type, subject, clients, note text, links to its
 attachments), `Other attachments/…` for `_attachmentdata`, and `documents_index.csv` listing
-everything. A note linked to several clients is saved in the first client's folder; the
-others are listed in the note and the index.
+everything. A note linked to several clients (a couple, a family trust) is saved, with its
+attachments, in each of those clients' folders.
 
 For a OneDrive-synced SharePoint folder (Files On-Demand on), each file is marked
 online-only so OneDrive frees the local copy after uploading, and the export pauses while
