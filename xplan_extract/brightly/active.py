@@ -35,6 +35,18 @@ class ListedClient:
     method: str = ""
 
 
+POLICY_SOURCES = [  # table, number columns, client column
+    ("external_accounts", ["account"], "entityid"),
+    ("ufield_entity_fund", ["fund_refnum"], "eidobj"),
+    ("ufield_entity_fund_cust", ["NAG_Member_Number"], "eidobj"),
+    ("ufield_entity_retirement_income", ["account_num"], "eidobj"),
+    ("sections_insurance_insurancepolicy", ["policy_number"], "eidobj"),
+    ("sections_insurance_insurancepolicycover", ["policy_number"], "client_id"),
+    ("entity_assets", ["policy_number", "account_client_number"], "eidobj"),
+    ("entity_liabilities", ["account_client_number", "policy_number"], "eidobj"),
+]
+
+
 def _cell(value) -> str:
     """Excel stores 12345 as 12345.0 - give the number back as written."""
     if isinstance(value, float) and value.is_integer():
@@ -62,6 +74,26 @@ def norm_name(value) -> str:
     return " ".join(sorted(words))
 
 
+def initial_keys(value) -> list[str]:
+    """"J Citizen", "Citizen, J A", "Jane Citizen" -> "citizen|j" (surname + first initial)."""
+    text = str(value or "").strip()
+    if "," in text:
+        last, _, first = text.partition(",")
+    else:
+        words = text.split()
+        if len(words) < 2:
+            return []
+        # "J Citizen" / "Jane Citizen": surname last; "CITIZEN J": surname first
+        if len(words[-1].strip(".")) == 1 and len(words[0].strip(".")) > 1:
+            last, first = words[0], " ".join(words[1:])
+        else:
+            last, first = words[-1], " ".join(words[:-1])
+    last = re.sub(r"[^a-z'-]", "", last.lower())
+    first = re.sub(r"\b(mr|mrs|ms|miss|dr|prof)\b\.?", " ", first.lower())
+    letters = re.findall(r"[a-z]", first)
+    return [f"{last}|{letters[0]}"] if last and letters else []
+
+
 def loose_name(value) -> str:
     """Like norm_name but also ignoring Pty Ltd, Super Fund, ATF, Trust ... wording."""
     return " ".join(w for w in norm_name(value).split() if w not in NOISE_WORDS)
@@ -78,6 +110,10 @@ def name_variants(value) -> list[str]:
     for part in re.split(r"\s+(?:atf|a/t/f|as trustee for|itf)\s+", text, flags=re.I):
         if part and part != text:
             out.append(part)
+    halves = [h.strip() for h in re.split(r"\s*(?:&|\band\b|/|\+)\s*", text, flags=re.I)
+              if h.strip()]
+    if len(halves) > 1:
+        out += halves  # "Jane Citizen & Sam Citizen"
     if "," in text:
         last, _, firsts = text.partition(",")
         for first in re.split(r"\s*(?:&|\band\b|/)\s*", firsts):
@@ -132,11 +168,26 @@ def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str
     home_of = lambda eid: builder.person_home.get(eid, (entity_home.get(eid),))[0]
 
     by_policy: dict[str, set[int]] = {}
+
+    def add_policy(number, eid):
+        p = _norm_policy(number)
+        if p and len(p) >= 4 and eid is not None:
+            by_policy.setdefault(p, set()).add(int(eid))
+
     for eid, rows in d.fds.items():
         for r in rows:
-            p = _norm_policy(r.get("policy_number"))
-            if p:
-                by_policy.setdefault(p, set()).add(eid)
+            add_policy(r.get("policy_number"), eid)
+    # The fee report's "Policy Number" is usually the product's account / policy / member
+    # number, which Xplan holds against the client in these tables.
+    for table, number_cols, owner_col in POLICY_SOURCES:
+        for r in d.db.rows(table, [owner_col, *number_cols]):
+            for col in number_cols:
+                add_policy(r.get(col), r.get(owner_col))
+    for eid, accounts in d.platform.items():
+        for r in accounts:
+            for owner in r.get("owners") or [eid]:
+                add_policy(r.get("externalaccount"), owner)
+                add_policy(r.get("subfund_account_name"), owner)
 
     by_name: dict[str, set[str]] = {}
     by_loose: dict[str, set[str]] = {}
@@ -148,8 +199,14 @@ def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str
             if structure and loose_name(name):
                 by_loose.setdefault(loose_name(name), set()).add(hid)
 
+    by_initial: dict[str, set[str]] = {}
     for hid, hh in builder.households.items():
         for p in hh.people:
+            last = clean_text(p.f.get("last_name"))
+            for first in (p.f.get("first_name"), p.f.get("preferred_name")):
+                if last and clean_text(first):
+                    for k in initial_keys(f"{clean_text(first)} {last}"):
+                        by_initial.setdefault(k, set()).add(hid)
             index(p.name, hid)
             index(p.f.get("entity_name"), hid)
             pref = clean_text(p.f.get("preferred_name"))
@@ -180,9 +237,20 @@ def match_active(listed: list[ListedClient], builder, entity_home: dict[int, str
                     hit = lookup.get(key, set())
                     if len(hit) == 1:
                         found |= hit
-                if len(found) == 1:
+                # every name on the line that points at exactly one household counts
+                # (a line can name two people from different households)
+                if found:
                     homes, c.method = found, label
                     break
+            if not homes:
+                found = set()
+                for n in names:
+                    for k in initial_keys(n):
+                        hit = by_initial.get(k, set())
+                        if len(hit) == 1:
+                            found |= hit
+                if found:
+                    homes, c.method = found, "Surname + first initial (unique)"
         c.households = homes
         active |= homes
     return active

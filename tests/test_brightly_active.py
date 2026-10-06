@@ -45,3 +45,12 @@ def test_name_variants_and_loose():
 def test_excel_numbers(tmp_path):
     from xplan_extract.brightly.active import _cell
     assert _cell(12345.0) == "12345" and _cell(1.5) == "1.5" and _cell(None) == ""
+
+
+def test_initial_keys():
+    from xplan_extract.brightly.active import initial_keys, name_variants
+    assert initial_keys("J Citizen") == initial_keys("Jane Citizen") == ["citizen|j"]
+    assert initial_keys("Citizen, J A") == ["citizen|j"]
+    assert initial_keys("CITIZEN J") == ["citizen|j"]
+    assert initial_keys("Mrs J. Citizen") == ["citizen|j"]
+    assert "Sam Citizen" in name_variants("Jane Citizen & Sam Citizen")
