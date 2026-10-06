@@ -25,6 +25,10 @@ SAMPLE_ROWS = 2000
 STATS_ROWS = 50_000   # bigger tables: fill rates and distinct counts from this many rows
 MAX_PICKLIST = 30
 MIN_REPEATS = 5       # a pick-list value is only shown if at least this many records share it
+# "Surname, First" values are only shown in columns that hold staff (advisers, users).
+PERSON_SHAPED = re.compile(r"^[A-Z][\w'’-]+,\s*[A-Z]")
+STAFF_COLUMN = re.compile(r"adviser|admin|issuer|paraplanner|_by$|^by$|modifiedby|assign|"
+                          r"^user|_user|^source$|created_by|modified_by|owner_user", re.I)
 SKIP_TYPES = {"varbinary", "binary", "image", "timestamp", "geography", "geometry",
               "hierarchyid", "sql_variant", "xml"}
 TEXT_TYPES = {"varchar", "nvarchar", "char", "nchar", "text", "ntext"}
@@ -154,8 +158,10 @@ def _profile_table(conn, full: str, target: str, rows: int) -> dict:
                 f"GROUP BY LEFT(CAST({_quote(c.name)} AS nvarchar(400)), 50) ORDER BY n DESC")).all()
             # Only genuine categories: shared by several records and without long numbers,
             # so a one-off address, ABN or name in a free-text column is never shown.
+            staff = bool(STAFF_COLUMN.search(c.name))
             shown = [f"{r.v} ({r.n})" for r in top
-                     if r.n >= MIN_REPEATS and not re.search(r"\d{4}", str(r.v))]
+                     if r.n >= MIN_REPEATS and not re.search(r"\d{4}", str(r.v))
+                     and (staff or not PERSON_SHAPED.match(str(r.v)))]
             hidden = sum(1 for r in top) - len(shown)
             if hidden:
                 shown.append(f"[{hidden} rarer value(s) hidden]")

@@ -23,3 +23,11 @@ def test_rare_picklist_values_hidden():
     from xplan_extract import profile
     src = inspect.getsource(profile._profile_table)
     assert "MIN_REPEATS" in src and r"\d{4}" in src
+
+
+def test_person_shaped_values():
+    from xplan_extract.profile import PERSON_SHAPED, STAFF_COLUMN
+    assert PERSON_SHAPED.match("Citizen, Jane")
+    assert not PERSON_SHAPED.match("Balanced")
+    assert STAFF_COLUMN.search("client_adviser") and STAFF_COLUMN.search("modified_by")
+    assert not STAFF_COLUMN.search("delegate_opt_in")
