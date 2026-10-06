@@ -4,3 +4,4 @@ pyodbc>=5.0
 SQLAlchemy>=2.0
 XlsxWriter>=3.1
 python-dotenv>=1.0
+tzdata>=2024.1

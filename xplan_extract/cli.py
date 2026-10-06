@@ -281,6 +281,31 @@ def cmd_documents(a) -> None:
         log(f"  {len(stats.errors):,} file(s) could not be saved, e.g. {stats.errors[0]}")
 
 
+def cmd_brightly(a) -> None:
+    from .brightly.export import UnsafeDestination, check_destination, export_brightly
+
+    if not a.out:
+        raise SystemExit("Set BRIGHTLY_OUT in .env (the secure SharePoint export folder) or pass --out.")
+    root = Path(env("BRIGHTLY_OUT")) if env("BRIGHTLY_OUT") else None
+    try:
+        out = check_destination(Path(a.out), root, a.allow_any_destination)
+    except UnsafeDestination as exc:
+        raise SystemExit(str(exc))
+    db = pick_database(a)
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = out / (f"sample_{stamp}" if a.sample else f"export_{stamp}")
+    log(f"Writing Brightly export to {out}")
+    m = export_brightly(sql_config(a).engine(db), out, a.schema, db, a.sample, progress=log)
+    log("")
+    for k, v in m["record_counts"].items():
+        log(f"  {k}: {v:,}")
+    log(f"  unmapped fields: {m['unmapped_fields']:,}  (unmapped.csv)")
+    log(f"  TFN values dropped: {m['tfn_fields_dropped']:,}; TFNs removed from text: "
+        f"{m['tfn_values_removed_from_text']:,}; sensitive health answers: "
+        f"{m['sensitive_health_values']:,}")
+    log(f"Done: {out}")
+
+
 def cmd_profile(a) -> None:
     from . import profile
 
@@ -416,6 +441,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")
     add_sql_args(p)
     p.set_defaults(func=cmd_documents)
+
+    p = sub.add_parser("brightly", help="Export households, entities and tasks in Brightly's "
+                                        "record shape (JSON Lines).")
+    p.add_argument("--out", default=env("BRIGHTLY_OUT"),
+                   help="Secure export folder (default BRIGHTLY_OUT from .env).")
+    p.add_argument("--schema", default=env("BRIGHTLY_SCHEMA"),
+                   help="Brightly factfind_schema.json (default BRIGHTLY_SCHEMA from .env).")
+    p.add_argument("--sample", type=int, default=0, metavar="N",
+                   help="Only N households (a couple, an SMSF, a trust ...) for checking.")
+    p.add_argument("--allow-any-destination", action="store_true",
+                   help="Allow writing outside BRIGHTLY_OUT (not recommended).")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_brightly)
 
     p = sub.add_parser("profile", help="Profile every table/column for data mapping, with "
                                        "personal details masked.")
