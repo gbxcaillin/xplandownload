@@ -64,7 +64,7 @@ def choose_sample(builder: BrightlyBuilder, entities: list[dict], size: int) -> 
 
 def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, source: str,
                     sample: int = 0, progress: Progress = print,
-                    active_list: Path | None = None) -> dict:
+                    active_list: Path | None = None, skip_unmapped: bool = False) -> dict:
     schema = Schema(schema_path)
     raw = engine.raw_connection()
     conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
@@ -118,8 +118,11 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
                 t["status"] = builder.status(t["c"])
             writer.write("tasks", t)
 
-        progress("Listing Xplan fields that aren't mapped ...")
-        writer.add_unmapped(unmapped_inventory(data, progress))
+        if skip_unmapped:
+            progress("Skipping the unmapped-field scan (--skip-unmapped).")
+        else:
+            progress("Listing Xplan fields that aren't mapped (a few minutes) ...")
+            writer.add_unmapped(unmapped_inventory(data, progress))
         writer.add_unmapped(builder.problems)
         writer.sensitive_values = builder.sensitive
         cur = conn.cursor()

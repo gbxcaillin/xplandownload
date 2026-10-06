@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -1239,7 +1240,9 @@ def unmapped_inventory(data: XplanData, progress: Progress) -> list[Unmapped]:
     db = data.db
     out: list[Unmapped] = []
     tables = sorted(db.tables.values())
-    for t in tables:
+    for number, t in enumerate(tables, 1):
+        if number % 100 == 0:
+            progress(f"  checked {number}/{len(tables)} tables")
         cols = db.columns(t)
         low = t.lower()
         linked = bool(LINK_COLUMNS & set(cols)) or low.startswith(("ufield_entity", "sections_",
@@ -1270,24 +1273,32 @@ def unmapped_inventory(data: XplanData, progress: Progress) -> list[Unmapped]:
                                                           "sql_variant")]
         if not ok:
             continue
+        # One pass per table: how many records have a real value, and the smallest and
+        # largest value (equal smallest/largest on every record = an untouched default).
         parts = []
         for c in ok:
             v = f"CAST([{c}] AS nvarchar(100))"
             parts.append(f"SUM(CASE WHEN NULLIF(LTRIM({v}), '') IS NOT NULL AND {v} NOT IN "
                          f"('0', '0.0', 'False', '[]', '-1') THEN 1 ELSE 0 END)")
-            parts.append(f"COUNT(DISTINCT {v})")
+            parts.append(f"COUNT({v})")
+            parts.append(f"MIN({v})")
+            parts.append(f"MAX({v})")
+        started = time.monotonic()
         try:
             row = db.conn.cursor().execute(
                 f"SELECT COUNT(*), {', '.join(parts)} FROM {qname(t)}").fetchone()
         except Exception as exc:
             progress(f"  (skipped {t}: {str(exc).splitlines()[0][:80]})")
             continue
+        took = time.monotonic() - started
+        if took > 15:
+            progress(f"  {t}: {took:,.0f}s")
         total = row[0]
         for i, c in enumerate(ok):
-            n, distinct = row[1 + 2 * i], row[2 + 2 * i]
+            n, filled, lo, hi = row[1 + 4 * i: 5 + 4 * i]
             if not n:
                 continue
-            if distinct == 1 and n == total and total > 1:
+            if total > 1 and filled == total and lo == hi:
                 continue  # the same default on every record: nobody filled it in
             out.append(Unmapped(t, c, int(n), suggest(t, c), "not mapped"))
     return out
