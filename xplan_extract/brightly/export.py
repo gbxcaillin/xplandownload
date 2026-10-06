@@ -64,7 +64,8 @@ def choose_sample(builder: BrightlyBuilder, entities: list[dict], size: int) -> 
 
 def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, source: str,
                     sample: int = 0, progress: Progress = print,
-                    active_list: Path | None = None, skip_unmapped: bool = False) -> dict:
+                    active_list: Path | None = None, skip_unmapped: bool = False,
+                    diagnose_active: bool = False) -> dict:
     schema = Schema(schema_path)
     raw = engine.raw_connection()
     conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
@@ -87,6 +88,10 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
             builder.active = match_active(listed, builder, entity_home)
             progress(f"Active-clients list: {len(listed)} client(s) -> "
                      f"{len(builder.active)} active household(s)")
+            if diagnose_active:
+                from .active import diagnose
+                for line in diagnose(listed, builder, entity_home):
+                    progress(line)
 
         wanted = (choose_sample(builder, entities, sample) if sample
                   else sorted(builder.households))

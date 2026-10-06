@@ -227,3 +227,62 @@ def compute_active(engine, list_path: Path, progress=print):
         return active_entity_ids(builder, entities, households), listed
     finally:
         raw.close()
+
+
+def _shape(value: str) -> str:
+    text = re.sub(r"[A-Z]", "A", str(value))
+    text = re.sub(r"[a-z]", "a", text)
+    return re.sub(r"\d", "9", text)
+
+
+def diagnose(listed: list[ListedClient], builder, entity_home: dict[int, str]) -> list[str]:
+    """Why listed clients didn't match - counts and masked shapes only, no names."""
+    from collections import Counter
+
+    d = builder.d
+    unmatched = [c for c in listed if not c.households]
+    lines = [f"Unmatched: {len(unmatched)} of {len(listed)}"]
+    reasons: Counter = Counter()
+    surnames = Counter()
+    for hh in builder.households.values():
+        for p in hh.people:
+            last = clean_text(p.f.get("last_name"))
+            if last:
+                surnames[last.lower()] += 1
+    for c in unmatched:
+        if c.crm_refs:
+            for ref in c.crm_refs:
+                e = d.entities.get(ref)
+                if e is None:
+                    reasons["CRM Reference not an Xplan id in this extract"] += 1
+                elif ref not in builder.person_home and ref not in entity_home:
+                    kind = e.type or "unknown type"
+                    in_clients = "in" if ref in d.clients else "not in"
+                    reasons[f"CRM Reference is an Xplan {kind} {in_clients} the client list, "
+                            f"not part of a household"] += 1
+            continue
+        name = c.name
+        words = re.findall(r"[A-Za-z']+", name)
+        if re.search(r"pty|ltd|limited|trust|super|fund|smsf|atf|holdings|investments|"
+                     r"partnership|estate", name, re.I):
+            reasons["company / trust / fund style name"] += 1
+        elif "&" in name or re.search(r"\band\b", name, re.I):
+            reasons["two people on one line"] += 1
+        elif any(len(w) == 1 for w in words):
+            reasons["contains initials"] += 1
+        else:
+            last = (name.split(",")[0] if "," in name else (words[-1] if words else "")).strip()
+            if surnames.get(last.lower()):
+                reasons["surname exists in Xplan, but no exact first-name match"] += 1
+            else:
+                reasons["surname not found in any Xplan household"] += 1
+    lines += [f"  {n:>4}  {r}" for r, n in reasons.most_common()]
+    report = Counter(_shape(p) for c in unmatched for p in c.policies)
+    xplan = Counter(_shape(_norm_policy(r.get("policy_number")))
+                    for rows in d.fds.values() for r in rows if r.get("policy_number"))
+    lines.append("Policy number formats on the report (unmatched clients): "
+                 + ", ".join(f"{s} ({n})" for s, n in report.most_common(6)))
+    lines.append("Policy number formats in Xplan's fee records:            "
+                 + ", ".join(f"{s} ({n})" for s, n in xplan.most_common(6)))
+    lines.append(f"Xplan fee (FDS) records cover {len(d.fds):,} client records.")
+    return lines

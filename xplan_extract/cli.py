@@ -311,7 +311,8 @@ def cmd_brightly(a) -> None:
     if active and not active.is_file():
         raise SystemExit(f"Active-clients list not found: {active}")
     m = export_brightly(sql_config(a).engine(db), out, a.schema, db, a.sample, progress=log,
-                        active_list=active, skip_unmapped=a.skip_unmapped)
+                        active_list=active, skip_unmapped=a.skip_unmapped,
+                        diagnose_active=a.active_check)
     log("")
     for k, v in m["record_counts"].items():
         log(f"  {k}: {v:,}")
@@ -471,6 +472,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Fees-by-client report (xlsx): records get \"status\": \"Active\" or \"Inactive\".")
     p.add_argument("--sample", type=int, default=0, metavar="N",
                    help="Only N households (a couple, an SMSF, a trust ...) for checking.")
+    p.add_argument("--active-check", action="store_true",
+                   help="Explain (counts only, no names) why fee-list clients didn't match.")
     p.add_argument("--skip-unmapped", action="store_true",
                    help="Skip the scan for unmapped Xplan fields (faster repeat samples).")
     p.add_argument("--allow-any-destination", action="store_true",
