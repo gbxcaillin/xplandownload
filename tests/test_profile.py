@@ -15,3 +15,11 @@ def test_personal_columns_never_show_values():
         assert PERSONAL.search(col), col
     for col in ["type", "status", "state_vlu", "gender"]:
         assert not PERSONAL.search(col), col
+
+
+def test_rare_picklist_values_hidden():
+    import inspect
+
+    from xplan_extract import profile
+    src = inspect.getsource(profile._profile_table)
+    assert "MIN_REPEATS" in src and r"\d{4}" in src

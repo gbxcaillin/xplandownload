@@ -24,6 +24,7 @@ Progress = Callable[[str], None]
 SAMPLE_ROWS = 2000
 STATS_ROWS = 50_000   # bigger tables: fill rates and distinct counts from this many rows
 MAX_PICKLIST = 30
+MIN_REPEATS = 5       # a pick-list value is only shown if at least this many records share it
 SKIP_TYPES = {"varbinary", "binary", "image", "timestamp", "geography", "geometry",
               "hierarchyid", "sql_variant", "xml"}
 TEXT_TYPES = {"varchar", "nvarchar", "char", "nchar", "text", "ntext"}
@@ -151,7 +152,14 @@ def _profile_table(conn, full: str, target: str, rows: int) -> dict:
                 f"SELECT TOP {MAX_PICKLIST} LEFT(CAST({_quote(c.name)} AS nvarchar(400)), 50) AS v, "
                 f"COUNT(*) AS n FROM {source} WHERE {_quote(c.name)} IS NOT NULL "
                 f"GROUP BY LEFT(CAST({_quote(c.name)} AS nvarchar(400)), 50) ORDER BY n DESC")).all()
-            entry["values"] = [f"{r.v} ({r.n})" for r in top]
+            # Only genuine categories: shared by several records and without long numbers,
+            # so a one-off address, ABN or name in a free-text column is never shown.
+            shown = [f"{r.v} ({r.n})" for r in top
+                     if r.n >= MIN_REPEATS and not re.search(r"\d{4}", str(r.v))]
+            hidden = sum(1 for r in top) - len(shown)
+            if hidden:
+                shown.append(f"[{hidden} rarer value(s) hidden]")
+            entry["values"] = shown
         info["columns"].append(entry)
     return info
 
