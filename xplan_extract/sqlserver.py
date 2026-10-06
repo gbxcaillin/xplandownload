@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ntpath
+import os
 import posixpath
 import re
 import shutil
@@ -138,6 +139,41 @@ def server_path_for(local_bak: Path, share_local: Path | None, share_server: str
     return joiner.join(share_server, *rel)
 
 
+def _check_space(files: list[dict], data_dir: str, log_dir: str, progress: Progress,
+                 enforce: bool) -> None:
+    """Report how big the restored database will be and stop if it won't fit."""
+    gb = 1024 ** 3
+    needs: dict[str, int] = {}
+    for f in files:
+        folder = log_dir if f["Type"] == "L" else data_dir
+        size = int(f.get("Size") or 0)
+        progress(f"  {f['LogicalName']} ({'log' if f['Type'] == 'L' else 'data'}): "
+                 f"{size / gb:,.1f} GB -> {folder}")
+        needs[folder] = needs.get(folder, 0) + size
+    progress(f"Restored database needs {sum(needs.values()) / gb:,.1f} GB in total.")
+
+    by_drive: dict[int, list] = {}
+    for folder, size in needs.items():
+        if not os.path.isdir(folder):
+            continue  # SQL Server is on another machine/container; it checks for itself
+        try:
+            usage = shutil.disk_usage(folder)
+        except OSError:
+            continue
+        key = os.stat(folder).st_dev  # same device = same pool of free space
+        entry = by_drive.setdefault(key, [0, usage.free, folder])
+        entry[0] += size
+    for need, free, folder in by_drive.values():
+        progress(f"Free space where SQL Server will put it ({folder}): {free / gb:,.1f} GB")
+        if need + 2 * gb > free and enforce:
+            raise RestoreError(
+                f"Not enough disk space: the restored database needs {need / gb:,.1f} GB "
+                f"(+2 GB spare) but only {free / gb:,.1f} GB is free in {folder}. "
+                "Free up space, or restore onto another (NTFS) drive with "
+                "--data-dir D:\\SQLData --log-dir D:\\SQLData."
+            )
+
+
 def restore_backup(
     cfg: SqlServerConfig,
     bak_server_path: str,
@@ -146,6 +182,7 @@ def restore_backup(
     data_dir: str | None = None,
     log_dir: str | None = None,
     progress: Progress = print,
+    check_only: bool = False,
 ) -> str:
     """Restore the backup and return the database name."""
     import pyodbc
@@ -177,7 +214,7 @@ def restore_backup(
 
     cur.execute("SELECT DB_ID(?)", db)
     exists = cur.fetchone()[0] is not None
-    if exists and not replace:
+    if exists and not replace and not check_only:
         raise RestoreError(
             f"Database '{db}' already exists. Use --replace to overwrite it, "
             "--database-name to restore under another name, or skip the restore and run "
@@ -207,6 +244,11 @@ def restore_backup(
         joiner = ntpath if "\\" in folder else posixpath
         safe = re.sub(r"[^\w.-]", "_", f"{db}_{logical}")
         moves.append(f"MOVE {_sql_str(logical)} TO {_sql_str(joiner.join(folder, safe + ext))}")
+
+    _check_space(files, data_dir, log_dir, progress, enforce=not check_only)
+    if check_only:
+        conn.close()
+        return db
 
     options = [f"FILE = {int(position)}", *moves, "RECOVERY", "STATS = 10"]
     if replace:

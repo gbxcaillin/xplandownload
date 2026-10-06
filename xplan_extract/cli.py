@@ -165,6 +165,7 @@ def step_restore(bak: Path, a) -> str:
     return sqlserver.restore_backup(
         cfg, server_path, database_name=a.database_name, replace=a.replace,
         data_dir=a.data_dir, log_dir=a.log_dir, progress=log,
+        check_only=getattr(a, "check_only", False),
     )
 
 
@@ -295,6 +296,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("restore", help="Restore a .bak file into SQL Server.")
     p.add_argument("bak", type=Path); add_sql_args(p); add_restore_args(p)
+    p.add_argument("--check-only", action="store_true",
+                   help="Only show how much space the restore needs; don't restore.")
     p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("export", help="Export an already-restored database to Excel/JSON.")
