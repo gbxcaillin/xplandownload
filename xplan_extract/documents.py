@@ -379,6 +379,7 @@ class DocOptions:
     entity_table: str | None = None
     entity_key: str | None = None
     entity_name: str | None = None
+    active_ids: set[int] | None = None   # client entity ids on the active list -> Active/Inactive
 
 
 @dataclass
@@ -388,6 +389,7 @@ class Stats:
     skipped_existing: int = 0
     bytes_written: int = 0
     no_client: int = 0
+    folders_moved: int = 0
     unlinked_parts: int = 0
     long_paths: int = 0
     errors: list[str] = field(default_factory=list)
@@ -559,9 +561,25 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
         for eid in dict.fromkeys(eids):
             name = entities.names.get(eid)
             label = f"{name} ({eid})" if name else f"Client {eid}"
-            folders.append((eid, dest / "Clients" / safe_name(label, MAX_FOLDER_CHARS,
-                                                               f"Client {eid}")))
+            folder_name = safe_name(label, MAX_FOLDER_CHARS, f"Client {eid}")
+            if opts.active_ids is None:
+                folders.append((eid, dest / "Clients" / folder_name))
+                continue
+            group = "Active" if eid in opts.active_ids else "Inactive"
+            target = dest / "Clients" / group / folder_name
+            if eid not in moved_checked:
+                moved_checked.add(eid)
+                if not opts.dry_run:
+                    for old in (dest / "Clients" / folder_name,
+                                dest / "Clients" / ("Inactive" if group == "Active"
+                                                    else "Active") / folder_name):
+                        if old.is_dir():
+                            move_folder(old, target)
+                            w.stats.folders_moved += 1
+            folders.append((eid, target))
         return folders
+
+    moved_checked: set[int] = set()
 
     selected = sorted(notes)
     if opts.limit:
@@ -669,7 +687,7 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
                 continue
             index_rows.append(["other attachment", "", "", "", "", "", "", "", str(aid),
                                str(attachid or ""), original, mimetype or "", size,
-                               str(path.relative_to(dest))])
+                               str(path.relative_to(dest)), ""])
 
     if not opts.dry_run:
         index_path = dest / "documents_index.csv"
@@ -677,10 +695,33 @@ def _export(conn, opts: DocOptions, progress: Progress) -> Stats:
             writer = csv.writer(fh)
             writer.writerow(["kind", "client_id", "client_name", "other_client_ids", "date",
                              "type", "subtype", "subject", "xplan_docid", "xplan_partid",
-                             "original_filename", "mimetype", "bytes", "saved_as"])
+                             "original_filename", "mimetype", "bytes", "saved_as", "status"])
             writer.writerows(index_rows)
         progress(f"Index of everything saved: {index_path}")
     return w.stats
+
+
+def move_folder(old: Path, new: Path) -> None:
+    """Move a client folder (merging if the target already exists). Inside a OneDrive folder
+    this is a move, not a re-upload."""
+    old_l, new_l = Path(_long(old)), Path(_long(new))
+    new_l.parent.mkdir(parents=True, exist_ok=True)
+    if not new_l.exists():
+        shutil.move(str(old_l), str(new_l))
+        return
+    for child in list(old_l.iterdir()):
+        if not (new_l / child.name).exists():
+            shutil.move(str(child), str(new_l / child.name))
+    try:
+        old_l.rmdir()
+    except OSError:
+        pass  # leftovers that already exist in the new place stay for a manual check
+
+
+def _status_of(path: Path, dest: Path) -> str:
+    parts = path.relative_to(dest).parts
+    return parts[1] if len(parts) > 2 and parts[0] == "Clients" and \
+        parts[1] in ("Active", "Inactive") else ""
 
 
 def _index_row(kind, note, entities, client, docid, partid, original, mimetype, size, path,
@@ -696,5 +737,5 @@ def _index_row(kind, note, entities, client, docid, partid, original, mimetype, 
         note.subtype if note else "",
         note.subject if note else "",
         docid, partid, original, mimetype or "", size,
-        str(path.relative_to(dest)),
+        str(path.relative_to(dest)), _status_of(path, dest),
     ]

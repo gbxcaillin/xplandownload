@@ -575,6 +575,12 @@ class BrightlyBuilder:
                 done.add(p.id)
                 self.person_home[p.id] = (hid, str(i))
 
+    def status(self, hid: str) -> str | None:
+        """"Active" (on the fee list) / "Inactive", or None when no list was given."""
+        if self.active is None:
+            return None
+        return "Active" if hid in self.active else "Inactive"
+
     def is_prospect(self, hh: Household) -> bool:
         labels = " ".join(hh.record_entity.labels).lower()
         return "prospect" in labels and "client" not in labels.replace("prospect", "")
@@ -678,7 +684,7 @@ class BrightlyBuilder:
                      "m": f"Imported from Xplan client {rec.id} (Xplan status: {status})"}],
         }
         if self.active is not None:
-            record["active"] = hh.id in self.active
+            record["status"] = self.status(hh.id)
         if self.is_prospect(hh):
             record.update({"prospect": True,
                            "source": clean_text(rec.f.get("referral_source")),

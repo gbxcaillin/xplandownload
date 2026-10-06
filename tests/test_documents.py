@@ -44,3 +44,20 @@ def test_wait_for_space_pauses_until_free(tmp_path, monkeypatch):
     messages = []
     documents.wait_for_space(tmp_path, 100, 10 * documents.GB, messages.append)
     assert "Low disk space" in messages[0] and "continuing" in messages[-1]
+
+
+def test_move_folder_merges(tmp_path):
+    from xplan_extract.documents import _status_of, move_folder
+    old = tmp_path / "Clients" / "Jane Citizen (101)"
+    old.mkdir(parents=True)
+    (old / "a.pdf").write_text("a")
+    new = tmp_path / "Clients" / "Active" / "Jane Citizen (101)"
+    move_folder(old, new)
+    assert (new / "a.pdf").exists() and not old.exists()
+    # merging into an existing target keeps both, never overwrites
+    old.mkdir()
+    (old / "a.pdf").write_text("different")
+    (old / "b.pdf").write_text("b")
+    move_folder(old, new)
+    assert (new / "a.pdf").read_text() == "a" and (new / "b.pdf").exists()
+    assert _status_of(new / "a.pdf", tmp_path) == "Active"

@@ -259,11 +259,21 @@ def cmd_documents(a) -> None:
     if a.limit and not 0 < a.limit <= 2000:
         raise SystemExit("--limit must be between 1 and 2000.")
     db = pick_database(a)
+    active_ids = None
+    if a.active_list:
+        from .brightly.active import compute_active
+        if not Path(a.active_list).is_file():
+            raise SystemExit(f"Active-clients list not found: {a.active_list}")
+        log("Working out active clients from the fee list ...")
+        active_ids, listed = compute_active(sql_config(a).engine(db), Path(a.active_list), log)
+        matched = sum(1 for c in listed if c.households)
+        log(f"  {matched} of {len(listed)} listed clients matched; "
+            f"{len(active_ids):,} Xplan clients/structures are Active")
     opts = documents.DocOptions(
         dest=Path(a.dest), dry_run=a.dry_run, limit=a.limit, min_free_gb=a.min_free_gb,
         include_notes=not a.no_notes, include_other=not a.no_other,
         online_only=not a.keep_local, entity_table=a.entity_table, entity_key=a.entity_key,
-        entity_name=a.entity_name,
+        entity_name=a.entity_name, active_ids=active_ids,
     )
     log(("DRY RUN - nothing will be written. " if a.dry_run else "") + f"Destination: {opts.dest}")
     stats = documents.export_documents(sql_config(a).engine(db), opts, progress=log)
@@ -275,6 +285,8 @@ def cmd_documents(a) -> None:
         log(f"  {stats.no_client:,} file notes have no client -> Clients\\_No client")
     if stats.unlinked_parts:
         log(f"  {stats.unlinked_parts:,} attached files have no file note -> Clients\\_Unlinked files")
+    if stats.folders_moved:
+        log(f"  {stats.folders_moved:,} existing client folder(s) moved into Active / Inactive")
     if stats.long_paths:
         log(f"  {stats.long_paths:,} paths are longer than 255 characters")
     if stats.errors:
@@ -439,6 +451,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-other", action="store_true", help="Skip _attachmentdata files.")
     p.add_argument("--keep-local", action="store_true",
                    help="Don't mark files online-only for OneDrive.")
+    p.add_argument("--active-list", default=env("BRIGHTLY_ACTIVE_LIST"),
+                   help="Fees-by-client report (xlsx): client folders go under Clients\\Active "
+                        "or Clients\\Inactive (existing folders are moved).")
     p.add_argument("--entity-table", help="Table with client names (auto-detected).")
     p.add_argument("--entity-key", help="Client id column in that table.")
     p.add_argument("--entity-name", help="SQL expression for the client name.")
@@ -453,7 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--schema", default=env("BRIGHTLY_SCHEMA"),
                    help="Brightly factfind_schema.json (default BRIGHTLY_SCHEMA from .env).")
     p.add_argument("--active-list", default=env("BRIGHTLY_ACTIVE_LIST"),
-                   help="Fees-by-client report (xlsx); listed clients get \"active\": true.")
+                   help="Fees-by-client report (xlsx): records get \"status\": \"Active\" or \"Inactive\".")
     p.add_argument("--sample", type=int, default=0, metavar="N",
                    help="Only N households (a couple, an SMSF, a trust ...) for checking.")
     p.add_argument("--allow-any-destination", action="store_true",

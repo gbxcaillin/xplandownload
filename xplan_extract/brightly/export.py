@@ -105,12 +105,17 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
                                               signed.get(hid, {}))
             writer.write("prospects" if record.get("prospect") else "households", record)
         for e in entities:
+            if builder.active is not None:
+                e["status"] = "Active" if (e["home"] in builder.active or any(
+                    r["c"] in builder.active for r in e["roles"])) else "Inactive"
             if e["home"] in wanted_set or any(r["c"] in wanted_set for r in e["roles"]):
                 if sample:  # keep only the sampled households' links
                     e = {**e, "roles": [r for r in e["roles"] if r["c"] in wanted_set],
                          "accts": [a for a in e["accts"] if a["c"] in wanted_set]}
                 writer.write("entities", e)
         for t in tasks:
+            if builder.active is not None:
+                t["status"] = builder.status(t["c"])
             writer.write("tasks", t)
 
         progress("Listing Xplan fields that aren't mapped ...")
@@ -125,10 +130,14 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
             from .active import write_report
             matched, total = write_report(listed, out_dir / "active_match.csv")
             writer.notes.append(
-                f"- **ACTIVE**: {matched} of {total} clients on the fee list were matched to a "
-                f"household (`active_match.csv` shows how; unmatched ones say NO). Households "
-                f"have `\"active\": true/false` - a field the brief doesn't define yet, so "
-                f"Brightly needs to read it (or tell us where an active flag should go).")
+                f"- **Active / Inactive**: {matched} of {total} clients on the fee list were "
+                f"matched to a household (`active_match.csv` shows how; unmatched ones say NO). "
+                f"{len(builder.active):,} households are \"Active\", the rest \"Inactive\" "
+                f"(prospects included). Households, prospects, entities and tasks carry "
+                f"`\"status\": \"Active\" | \"Inactive\"` - a field the brief doesn't define "
+                f"yet. **Brightly change needed:** hide `status = \"Inactive\"` records by "
+                f"default (lists, search results, portal); show them when the user filters on, "
+                f"or searches for, \"inactive\".")
         manifest = writer.close(_readme(builder, writer, sample, wanted))
         manifest["sample"] = bool(sample)
         return manifest

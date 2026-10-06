@@ -139,3 +139,30 @@ def write_report(listed: list[ListedClient], path: Path) -> tuple[int, int]:
                         "; ".join(sorted(c.households)), len(c.policies),
                         "; ".join(str(x) for x in sorted(c.crm_refs))])
     return matched, len(listed)
+
+
+def active_entity_ids(builder, entities: list[dict], households: set[str]) -> set[int]:
+    """Everyone and everything belonging to an active household."""
+    ids = {p.id for hid in households for p in builder.households[hid].people}
+    for e in entities:
+        if e["home"] in households or any(r["c"] in households for r in e["roles"]):
+            ids.add(int(e["ext"]["xplan"]))
+    return ids
+
+
+def compute_active(engine, list_path: Path, progress=print):
+    """For the documents export: (active entity ids, listed clients) from the fee report."""
+    from .xplan_map import BrightlyBuilder, XplanData, XplanDb
+
+    raw = engine.raw_connection()
+    conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
+    try:
+        data = XplanData(XplanDb(conn), progress)
+        builder = BrightlyBuilder(data, None)
+        entities = builder.entity_records()
+        entity_home = {int(e["ext"]["xplan"]): e["home"] for e in entities}
+        listed = read_active_list(list_path)
+        households = match_active(listed, builder, entity_home)
+        return active_entity_ids(builder, entities, households), listed
+    finally:
+        raw.close()
