@@ -121,28 +121,37 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, **kw)
 
 
-def pack(tool: str, archive: Path, inputs: list[Path], progress: Progress) -> None:
+def pack(tool: str, archive: Path, inputs: list[Path], progress: Progress) -> Path:
     """7-Zip, store only (the data is already compressed), AES-256 incl. file names.
     '-p' with no value makes 7-Zip ask for the password (twice) itself. Absolute input paths
-    are stored by their last name only (e.g. 'output/...', 'extract_....zip')."""
+    are stored by their last name only (e.g. 'output/...', 'extract_....zip').
+    Returns the unfinished '.partial' file; it only becomes the archive once tested."""
     tmp = archive.with_name(archive.name + ".partial")
     tmp.unlink(missing_ok=True)
-    progress(f"  Packing into {archive.name} - 7-Zip will ask for the archive password twice.")
-    progress("  Use the password from your password manager; without it the archive can't be opened.")
+    progress(f"  Packing into {archive.name} - 7-Zip will ask for the archive password.")
+    progress("  Paste it from where you keep it (right-click); nothing shows while you paste.")
     r = run([tool, "a", "-t7z", "-mx=0", "-mhe=on", "-bsp1", "-p", str(tmp.resolve()),
              *[str(p.resolve()) for p in inputs]])
     if r.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise VaultError(f"7-Zip failed (exit {r.returncode}).")
-    tmp.replace(archive)
+    return tmp
 
 
-def test_archive(tool: str, archive: Path, progress: Progress) -> None:
-    progress(f"  Testing {archive.name} - type the archive password once more.")
-    r = run([tool, "t", "-p", "-bsp1", str(archive)])
-    if r.returncode != 0:
-        raise VaultError(f"7-Zip test failed for {archive} (wrong password or damaged). "
-                         "Delete it and run again.")
+def test_archive(tool: str, tmp: Path, archive: Path, progress: Progress, tries: int = 3) -> None:
+    """7-Zip reopens the new archive with the password typed again. A typo here doesn't
+    mean the archive is bad, so allow a few tries before throwing it away."""
+    for attempt in range(1, tries + 1):
+        progress(f"  Testing {archive.name} - enter the archive password again "
+                 f"(try {attempt} of {tries}).")
+        if run([tool, "t", "-t7z", "-p", "-bsp1", str(tmp)]).returncode == 0:
+            tmp.replace(archive)
+            progress("  Test passed: the archive opens with that password.")
+            return
+    tmp.unlink(missing_ok=True)
+    raise VaultError("The archive didn't open with the password entered, so it was deleted "
+                     "(nothing was uploaded). Run the command again and enter the same password "
+                     "every time.")
 
 
 def blob_url(account: str, container: str, snapshot: str, name: str) -> str:
@@ -214,8 +223,8 @@ def archive_set(name: str, sources: list[Path], staging: Path, account: str, *,
     if archive.exists():
         progress(f"  Archive already made: {archive.name}")
     else:
-        pack(tool7, archive, [manifest_path] + [s for s in sources], progress)
-        test_archive(tool7, archive, progress)
+        tmp = pack(tool7, archive, [manifest_path] + list(sources), progress)
+        test_archive(tool7, tmp, archive, progress)
 
     progress("  Hashing the archive ...")
     ah = hash_file(archive, progress)

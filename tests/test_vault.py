@@ -102,3 +102,15 @@ def test_missing_7zip_message(monkeypatch):
     monkeypatch.delenv("SEVEN_ZIP", raising=False)
     with pytest.raises(vault.VaultError, match="7-zip.org"):
         vault.seven_zip()
+
+
+def test_failed_test_deletes_unfinished_archive(tmp_path):
+    tools = tmp_path / "tools"; tools.mkdir()
+    seven = script(tools / "7z", FAKE_7Z.replace('if args[0] == "t":\n    sys.exit(0)',
+                                                 'if args[0] == "t":\n    sys.exit(2)'))
+    d = tmp_path / "output"; d.mkdir(); (d / "t.json").write_text("{}")
+    staging = tmp_path / "s"
+    with pytest.raises(vault.VaultError, match="deleted"):
+        vault.archive_set("derived", [d], staging, "acct", seven=seven, upload_it=False,
+                          progress=lambda m: None)
+    assert not [p for p in staging.rglob("*.7z*")]
