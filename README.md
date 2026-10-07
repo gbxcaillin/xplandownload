@@ -105,6 +105,24 @@ For a OneDrive-synced SharePoint folder (Files On-Demand on), each file is marke
 online-only so OneDrive frees the local copy after uploading, and the export pauses while
 free disk space is below `--min-free-gb` (default 10). Re-running skips files already saved.
 
+### Archive to Azure Blob storage
+
+Keeps an encrypted, checked copy of the raw Iress zip (and, separately, the exports) in Azure.
+Needs [7-Zip](https://www.7-zip.org) and [AzCopy](https://aka.ms/downloadazcopy-v10-windows)
+(set `AZCOPY` / `SEVEN_ZIP` in `.env` if they aren't on PATH) and the
+**Storage Blob Data Contributor** role on the storage account.
+
+```
+python -m xplan_extract archive --set raw        # the Iress zip -> xplan-raw (Cold tier)
+python -m xplan_extract archive --set derived    # OUTPUT_DIR exports -> xplan-derived
+```
+
+Each run writes `MANIFEST-<set>.json` (SHA-256 of every source file), packs it with the files
+into a 7-Zip AES-256 archive (7-Zip asks for the password; keep it in the password manager),
+tests the archive, uploads it with AzCopy (sign in with your Microsoft account) and checks
+Azure's MD5 against the local one. `ARCHIVE_INDEX.json` in the staging folder records what was
+archived. Re-running skips finished steps.
+
 ### Individual steps
 
 ```

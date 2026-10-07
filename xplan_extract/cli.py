@@ -19,7 +19,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from . import archive, exporter, sftp, sqlserver
+from . import archive, exporter, sftp, sqlserver, vault
 
 
 def log(msg: str) -> None:
@@ -402,6 +402,25 @@ def cmd_run(a) -> None:
     step_export(sql_config(a).engine(db), db, a)
 
 
+def cmd_archive(a) -> None:
+    from . import vault
+
+    if not a.no_upload and not a.account:
+        raise SystemExit("Pass --account NAME (or set AZURE_STORAGE_ACCOUNT in .env), "
+                         "e.g. brightlyarchive01.")
+    sets = ["raw", "derived"] if a.set == "all" else [a.set]
+    for name in sets:
+        if name == "raw":
+            sources = [a.zip] if a.zip else sorted(a.download_dir.glob("*.zip"))
+            if not sources:
+                raise SystemExit(f"No zip in {a.download_dir}. Pass --zip PATH to the Iress extract.")
+        else:
+            sources = [a.derived_dir]
+        vault.archive_set(name, sources, a.staging, a.account, tenant=a.tenant,
+                          seven=a.seven_zip, az=a.azcopy, upload_it=not a.no_upload, progress=log)
+    log(f"\nDone. Record of what was archived: {a.staging / vault.INDEX}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xplan_extract",
@@ -504,6 +523,24 @@ def build_parser() -> argparse.ArgumentParser:
     add_sql_args(p)
     p.set_defaults(func=cmd_tables)
 
+    p = sub.add_parser("archive", help="Hash, encrypt (7-Zip AES-256) and upload the raw extract "
+                                       "and the derived exports to Azure Blob storage.")
+    p.add_argument("--set", choices=["raw", "derived", "all"], default="raw",
+                   help="raw = the Iress zip; derived = the OUTPUT_DIR exports (default raw).")
+    p.add_argument("--account", default=env("AZURE_STORAGE_ACCOUNT"),
+                   help="Azure storage account name (AZURE_STORAGE_ACCOUNT).")
+    p.add_argument("--tenant", default=env("AZURE_TENANT_ID"),
+                   help="Microsoft tenant id for sign-in (AZURE_TENANT_ID, usually not needed).")
+    p.add_argument("--zip", type=Path, help="The Iress extract zip (default: the zip in DOWNLOAD_DIR).")
+    p.add_argument("--derived-dir", type=Path, default=Path(env("OUTPUT_DIR", "output")))
+    p.add_argument("--staging", type=Path, default=Path(env("ARCHIVE_STAGING", "data/archive")),
+                   help="Where the encrypted archives are built (needs as much free space as the set).")
+    p.add_argument("--no-upload", action="store_true", help="Only hash and pack; don't upload.")
+    p.add_argument("--seven-zip", default=None, help="Path to 7z.exe (or SEVEN_ZIP in .env).")
+    p.add_argument("--azcopy", default=None, help="Path to azcopy.exe (or AZCOPY in .env).")
+    dirs(p)
+    p.set_defaults(func=cmd_archive)
+
     p = sub.add_parser("export", help="Export an already-restored database to Excel/JSON.")
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")
     p.add_argument("--url", help="Any SQLAlchemy URL instead, e.g. sqlite:///file.db")
@@ -526,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         args.func(args)
-    except (sftp.SftpError, archive.ArchiveError, sqlserver.RestoreError) as exc:
+    except (sftp.SftpError, archive.ArchiveError, sqlserver.RestoreError, vault.VaultError) as exc:
         log(f"\nERROR: {exc}")
         return 1
     except KeyboardInterrupt:
