@@ -140,11 +140,13 @@ def pack(tool: str, archive: Path, inputs: list[Path], progress: Progress) -> Pa
 
 def test_archive(tool: str, tmp: Path, archive: Path, progress: Progress, tries: int = 3) -> None:
     """7-Zip reopens the new archive with the password typed again. A typo here doesn't
-    mean the archive is bad, so allow a few tries before throwing it away."""
+    mean the archive is bad, so allow a few tries before throwing it away. No '-p' here:
+    for 't' an empty '-p' means "no password" rather than "ask", and 7-Zip asks by itself
+    when it finds the archive is encrypted."""
     for attempt in range(1, tries + 1):
         progress(f"  Testing {archive.name} - enter the archive password again "
                  f"(try {attempt} of {tries}).")
-        if run([tool, "t", "-t7z", "-p", "-bsp1", str(tmp)]).returncode == 0:
+        if run([tool, "t", "-t7z", "-bsp1", str(tmp)]).returncode == 0:
             tmp.replace(archive)
             progress("  Test passed: the archive opens with that password.")
             return
