@@ -172,14 +172,20 @@ def ensure_login(tool: str, tenant: str | None, progress: Progress) -> None:
 
 
 def remote_md5(tool: str, url: str) -> str | None:
-    """Content-MD5 of the blob ('' if it has none), or None if it isn't there."""
-    r = run([tool, "list", url, "--properties", "ContentMD5"], capture_output=True, text=True)
+    """Content-MD5 of the blob ('' if it has none), or None if it isn't there.
+    Lists the blob's folder; AzCopy prints one line per blob, e.g.
+    'name.7z; ContentMD5: 7AOP...==; Content Length: 4.81 GiB' (sometimes with 'INFO: ')."""
+    folder, name = url.rsplit("/", 1)
+    r = run([tool, "list", folder + "/", "--properties", "ContentMD5"],
+            capture_output=True, text=True)
     if r.returncode != 0:
         return None
-    name = url.rsplit("/", 1)[1]
     for line in r.stdout.splitlines():
-        if name in line and "Content Length" in line:
-            m = re.search(r"ContentMD5:\s*([A-Za-z0-9+/=]+)", line)
+        first = line.split(";", 1)[0].strip()
+        if first.startswith("INFO:"):
+            first = first[5:].strip()
+        if first.rsplit("/", 1)[-1] == name:
+            m = re.search(r"Content ?MD5:\s*([A-Za-z0-9+/=]+)", line)
             return m.group(1) if m else ""
     return None
 

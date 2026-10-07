@@ -36,11 +36,12 @@ if args[0] == "copy":
     dest = local(args[2]); dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args[1], dest); sys.exit(0)
 if args[0] == "list":
-    p = local(args[1])
+    # real AzCopy output format: lists the folder, 'name; ContentMD5: x; Content Length: y'
+    d = local(args[1].rstrip("/"))
     print("INFO: Authenticating to source using Azure AD")
-    if p.exists():
+    for p in (sorted(d.iterdir()) if d.is_dir() else []):
         md5 = base64.b64encode(hashlib.md5(p.read_bytes()).digest()).decode()
-        print(f"INFO: {p.name}; Content Length: {p.stat().st_size}; ContentMD5: {md5}")
+        print(f"{p.name}; ContentMD5: {md5}; Content Length: {p.stat().st_size} B")
     sys.exit(0)
 sys.exit(2)
 """
