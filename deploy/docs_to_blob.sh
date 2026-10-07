@@ -18,7 +18,7 @@ for r in sp az; do
 done
 
 echo "==> Source size (this lists every file, a few minutes)"
-rclone size "$SRC"
+rclone size "$SRC" --exclude "Xplan Archive/**"
 
 echo "==> Copying $SRC  ->  $DEST"
 echo "    Log: $LOG"
