@@ -117,6 +117,14 @@ python -m xplan_extract archive --set raw        # the Iress zip -> xplan-raw (C
 python -m xplan_extract archive --set derived    # OUTPUT_DIR exports -> xplan-derived
 ```
 
+If the Iress zip and `.bak` have been deleted, make a fresh, verified backup of the restored
+database first and archive that:
+
+```
+python -m xplan_extract backup --dest E:\                      # COPY_ONLY, compressed, checksummed, verified
+python -m xplan_extract archive --set raw --file E:\<database>.bak
+```
+
 Each run writes `MANIFEST-<set>.json` (SHA-256 of every source file), packs it with the files
 into a 7-Zip AES-256 archive (7-Zip asks for the password; keep it in the password manager),
 tests the archive, uploads it with AzCopy (sign in with your Microsoft account) and checks

@@ -37,3 +37,37 @@ def test_server_path_for_share(tmp_path):
     assert sqlserver.server_path_for(bak, share, "/var/opt/mssql/backups", lambda m: None) \
         == "/var/opt/mssql/backups/x.bak"
     assert (share / "x.bak").exists()
+
+
+class _Cur:
+    def __init__(self, used, fail_compression=False):
+        self.sql, self.used, self.fail = [], used, fail_compression
+        self._row = None
+
+    def execute(self, sql, *params):
+        import pyodbc
+        self.sql.append(sql)
+        if "COMPRESSION" in sql and self.fail:
+            raise pyodbc.Error("BACKUP DATABASE WITH COMPRESSION is not supported on Express")
+        self._row = ((1,) if "DB_ID" in sql else ("/backups",) if "BackupPath" in sql
+                     else (self.used,) if "SpaceUsed" in sql else None)
+
+    def fetchone(self):
+        return self._row
+
+    def nextset(self):
+        return False
+
+
+def test_backup_database_compresses_and_verifies(monkeypatch):
+    pytest.importorskip("pyodbc")
+    cur = _Cur(used=1000, fail_compression=True)
+    monkeypatch.setattr(sqlserver, "_connect_master",
+                        lambda cfg: SimpleNamespace(cursor=lambda: cur, close=lambda: None))
+    msgs = []
+    path = sqlserver.backup_database(None, "extract_x_202610021612", progress=msgs.append)
+    assert path == "/backups/extract_x_202610021612.bak"
+    backups = [s for s in cur.sql if s.startswith("BACKUP")]
+    assert "COPY_ONLY" in backups[0] and backups[0].endswith(", COMPRESSION")
+    assert not backups[1].endswith("COMPRESSION")  # retried without
+    assert any(s.startswith("RESTORE VERIFYONLY") for s in cur.sql)

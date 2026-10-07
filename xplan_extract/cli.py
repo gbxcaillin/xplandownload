@@ -222,6 +222,13 @@ def cmd_restore(a) -> None:
     step_restore(a.bak, a)
 
 
+def cmd_backup(a) -> None:
+    db = pick_database(a)
+    path = sqlserver.backup_database(sql_config(a), db, a.dest, log)
+    log("\nNext, archive it to Azure:\n"
+        f'  python -m xplan_extract archive --set raw --file "{path}"')
+
+
 def cmd_export(a) -> None:
     if a.url:
         import sqlalchemy as sa
@@ -543,6 +550,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--azcopy", default=None, help="Path to azcopy.exe (or AZCOPY in .env).")
     dirs(p)
     p.set_defaults(func=cmd_archive)
+
+    p = sub.add_parser("backup", help="Make a fresh, verified .bak of the restored database "
+                                      "(e.g. when the original zip/.bak was deleted).")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    p.add_argument("--dest", help="Folder for the .bak, as SQL Server sees it "
+                                  "(default: SQL Server's backup folder).")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_backup)
 
     p = sub.add_parser("export", help="Export an already-restored database to Excel/JSON.")
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")

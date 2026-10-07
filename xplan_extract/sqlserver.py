@@ -17,6 +17,7 @@ from typing import Callable
 import sqlalchemy as sa
 
 Progress = Callable[[str], None]
+GB = 1024 ** 3
 
 
 class RestoreError(Exception):
@@ -402,3 +403,63 @@ def restore_backup(
         conn.close()
     progress(f"Database '{db}' restored.")
     return db
+
+
+# --------------------------------------------------------------------------
+# Backup (to re-create the raw .bak from the restored database)
+# --------------------------------------------------------------------------
+
+def backup_database(cfg: SqlServerConfig, db: str, dest_dir: str | None = None,
+                    progress: Progress = print) -> str:
+    """Full COPY_ONLY backup with checksums, then RESTORE VERIFYONLY. Named '<db>.bak' so the
+    archive keeps the extract's snapshot date. Returns the backup's path (as the server sees it)."""
+    import pyodbc
+
+    conn = _connect_master(cfg)
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT DB_ID(?)", db)
+        if cur.fetchone()[0] is None:
+            raise RestoreError(f"Database '{db}' doesn't exist on this server.")
+        if not dest_dir:
+            cur.execute("SELECT CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS nvarchar(4000))")
+            dest_dir = cur.fetchone()[0]
+        if not dest_dir:
+            raise RestoreError("Could not find SQL Server's backup folder; pass --dest.")
+        joiner = ntpath if "\\" in dest_dir else posixpath
+        path = joiner.join(dest_dir, re.sub(r"[^\w.-]", "_", db) + ".bak")
+
+        cur.execute(f"SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) * 8192 "
+                    f"FROM {_sql_name(db)}.sys.database_files")
+        used = int(cur.fetchone()[0] or 0)
+        if Path(dest_dir).exists():
+            free = shutil.disk_usage(dest_dir).free
+            progress(f"Database uses {used / GB:,.1f} GB; {free / GB:,.1f} GB free in {dest_dir}.")
+            if used + 2 * GB > free:
+                raise RestoreError(f"Not enough space in {dest_dir} for the backup (up to "
+                                   f"{used / GB:,.0f} GB). Pass --dest on a drive with more room.")
+
+        progress(f"Backing up '{db}' to {path} (compressed, with checksums) - this can take "
+                 "15-30 minutes ...")
+        base = f"BACKUP DATABASE {_sql_name(db)} TO DISK = {_sql_str(path)} WITH COPY_ONLY, " \
+               f"CHECKSUM, INIT, STATS = 10"
+        try:
+            cur.execute(base + ", COMPRESSION")
+            _drain(cur)
+        except pyodbc.Error as exc:
+            if "compress" not in str(exc).lower():
+                raise RestoreError(f"Backup failed: {exc}") from exc
+            progress("This SQL Server edition can't compress backups; backing up uncompressed.")
+            cur.execute(base)
+            _drain(cur)
+
+        progress("Verifying the backup (RESTORE VERIFYONLY) ...")
+        try:
+            cur.execute(f"RESTORE VERIFYONLY FROM DISK = {_sql_str(path)} WITH CHECKSUM")
+            _drain(cur)
+        except pyodbc.Error as exc:
+            raise RestoreError(f"The backup didn't verify: {exc}") from exc
+    finally:
+        conn.close()
+    progress(f"Backup made and verified: {path}")
+    return path
