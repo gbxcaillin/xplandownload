@@ -51,6 +51,7 @@ AllowUsers $ADMIN_USER
 MaxAuthTries 3
 X11Forwarding no
 CONF
+install -d -m 755 /run/sshd  # absent on 24.04 until ssh has started (socket activation)
 sshd -t
 systemctl reload ssh 2>/dev/null || systemctl restart ssh
 
