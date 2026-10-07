@@ -429,12 +429,13 @@ def backup_database(cfg: SqlServerConfig, db: str, dest_dir: str | None = None,
         joiner = ntpath if "\\" in dest_dir else posixpath
         path = joiner.join(dest_dir, re.sub(r"[^\w.-]", "_", db) + ".bak")
 
-        cur.execute(f"SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) * 8192 "
-                    f"FROM {_sql_name(db)}.sys.database_files")
+        # allocated size of the data files (FILEPROPERTY would read master's, not db's, files)
+        cur.execute("SELECT SUM(CAST(size AS bigint)) * 8192 FROM sys.master_files "
+                    "WHERE database_id = DB_ID(?) AND type = 0", db)
         used = int(cur.fetchone()[0] or 0)
         if Path(dest_dir).exists():
             free = shutil.disk_usage(dest_dir).free
-            progress(f"Database uses {used / GB:,.1f} GB; {free / GB:,.1f} GB free in {dest_dir}.")
+            progress(f"Database data files: {used / GB:,.1f} GB; {free / GB:,.1f} GB free in {dest_dir}.")
             if used + 2 * GB > free:
                 raise RestoreError(f"Not enough space in {dest_dir} for the backup (up to "
                                    f"{used / GB:,.0f} GB). Pass --dest on a drive with more room.")

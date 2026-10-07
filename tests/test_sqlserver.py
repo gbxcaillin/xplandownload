@@ -50,7 +50,7 @@ class _Cur:
         if "COMPRESSION" in sql and self.fail:
             raise pyodbc.Error("BACKUP DATABASE WITH COMPRESSION is not supported on Express")
         self._row = ((1,) if "DB_ID" in sql else ("/backups",) if "BackupPath" in sql
-                     else (self.used,) if "SpaceUsed" in sql else None)
+                     else (self.used,) if "master_files" in sql else None)
 
     def fetchone(self):
         return self._row
