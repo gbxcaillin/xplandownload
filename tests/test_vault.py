@@ -55,6 +55,7 @@ def script(path: Path, body: str) -> str:
 
 def test_snapshot_label():
     assert vault.snapshot_label(["extract_x_DM8093_202610021612.zip"]) == "2026-10-02_1612"
+    assert vault.snapshot_label(["extract_x_DM8093_202610021612.bak"]) == "2026-10-02_1612"
 
 
 def test_archive_set_packs_uploads_verifies_and_resumes(tmp_path):

@@ -41,11 +41,11 @@ class VaultError(Exception):
 
 
 def snapshot_label(names: list[str]) -> str:
-    """'extract_..._202610021612.zip' -> '2026-10-02_1612'; else today's date."""
+    """'extract_..._202610021612.zip' (or .bak) -> '2026-10-02_1612'; else today's date."""
     for n in names:
-        m = re.search(r"_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})\.zip$", n, re.I)
+        m = re.search(r"_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})\.(zip|bak)$", n, re.I)
         if m:
-            y, mo, d, h, mi = m.groups()
+            y, mo, d, h, mi, _ = m.groups()
             return f"{y}-{mo}-{d}_{h}{mi}"
     return dt.date.today().isoformat()
 

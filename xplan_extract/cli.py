@@ -413,7 +413,8 @@ def cmd_archive(a) -> None:
         if name == "raw":
             sources = [a.zip] if a.zip else sorted(a.download_dir.glob("*.zip"))
             if not sources:
-                raise SystemExit(f"No zip in {a.download_dir}. Pass --zip PATH to the Iress extract.")
+                raise SystemExit(f"No zip in {a.download_dir}. Pass --file PATH to the Iress extract "
+                                 "zip, or to the .bak that came out of it.")
         else:
             sources = [a.derived_dir]
         vault.archive_set(name, sources, a.staging, a.account, tenant=a.tenant,
@@ -531,7 +532,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Azure storage account name (AZURE_STORAGE_ACCOUNT).")
     p.add_argument("--tenant", default=env("AZURE_TENANT_ID"),
                    help="Microsoft tenant id for sign-in (AZURE_TENANT_ID, usually not needed).")
-    p.add_argument("--zip", type=Path, help="The Iress extract zip (default: the zip in DOWNLOAD_DIR).")
+    p.add_argument("--zip", "--file", dest="zip", type=Path,
+                   help="The Iress extract zip, or the .bak from it if the zip is gone "
+                        "(default: the zip in DOWNLOAD_DIR).")
     p.add_argument("--derived-dir", type=Path, default=Path(env("OUTPUT_DIR", "output")))
     p.add_argument("--staging", type=Path, default=Path(env("ARCHIVE_STAGING", "data/archive")),
                    help="Where the encrypted archives are built (needs as much free space as the set).")
