@@ -22,7 +22,7 @@ rclone size "$SRC"
 
 echo "==> Copying $SRC  ->  $DEST"
 echo "    Log: $LOG"
-rclone copy "$SRC" "$DEST" \
+rclone copy "$SRC" "$DEST" --exclude "Xplan Archive/**" \
   --transfers 8 --checkers 16 \
   --azureblob-no-check-container \
   --retries 5 --low-level-retries 20 \
@@ -30,7 +30,7 @@ rclone copy "$SRC" "$DEST" \
   --log-file "$LOG" --log-level INFO
 
 echo "==> Checking every file arrived (names and sizes)"
-if rclone check "$SRC" "$DEST" --size-only --one-way \
+if rclone check "$SRC" "$DEST" --exclude "Xplan Archive/**" --size-only --one-way \
      --missing-on-dst "$HOME/docs-missing.txt" --differ "$HOME/docs-differ.txt" \
      --log-file "$LOG" --log-level NOTICE; then
   echo "All files are in Azure with matching sizes."
