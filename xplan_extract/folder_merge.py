@@ -385,6 +385,7 @@ def read_decisions(path: Path) -> list[dict]:
 class MergeResult:
     merged: int = 0
     kept: int = 0
+    skipped: int = 0        # left for later (not in the chosen confidence levels)
     files_moved: int = 0
     duplicates_removed: int = 0
     renamed: int = 0
@@ -407,7 +408,10 @@ def _unique(folder: Path, name: str, hint: str) -> str:
     return candidate
 
 
-def apply_merges(dest: Path, review: Path, progress: Progress = print) -> MergeResult:
+def apply_merges(dest: Path, review: Path, progress: Progress = print,
+                 only: Iterable[str] | None = None) -> MergeResult:
+    """Merge the rows marked "merge"; with ``only``, just those Confidence levels."""
+    levels = {x.strip().lower() for x in only} if only else None
     clients = dest / "Clients"
     index_path = dest / INDEX
     head: list[str] = []
@@ -450,6 +454,9 @@ def apply_merges(dest: Path, review: Path, progress: Progress = print) -> MergeR
     log: list[list[str]] = []
     for d in read_decisions(review):
         decision = d.get(DECISION, "").lower()
+        if levels is not None and d.get("Confidence", "").strip().lower() not in levels:
+            result.skipped += 1
+            continue
         if not decision.startswith("merge"):
             result.kept += 1
             continue

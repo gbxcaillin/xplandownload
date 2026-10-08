@@ -439,15 +439,20 @@ def cmd_merge_folders(a) -> None:
         review = Path(a.review) if a.review else folder_merge.latest_review(dest)
         if not review or not review.is_file():
             raise SystemExit("No review sheet found: run merge-folders without --apply first.")
-        log(f"Merging the folders marked 'merge' in {review.name} ...")
+        only = [x for x in (a.only or "").split(",") if x.strip()] or None
+        log(f"Merging the folders marked 'merge' in {review.name}"
+            + (f" (confidence: {', '.join(only)} only)" if only else "") + " ...")
         try:
-            r = folder_merge.apply_merges(dest, review, log)
+            r = folder_merge.apply_merges(dest, review, log, only)
         except PermissionError:
             raise SystemExit(f"{review.name} is open (in Excel?). Close it and try again.")
         except ValueError as exc:
             raise SystemExit(str(exc))
         log("")
         log(f"Merged {r.merged:,} folder(s); {r.kept:,} marked keep were left alone")
+        if r.skipped:
+            log(f"  {r.skipped:,} other row(s) left for later: run merge-folders again for a "
+                "fresh list of what's left")
         log(f"  files moved {r.files_moved:,}; exact duplicates removed {r.duplicates_removed:,} "
             f"(SharePoint recycle bin); renamed '(from <id>)' {r.renamed:,}")
         if r.index_rows_updated:
@@ -701,6 +706,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true",
                    help="Merge the folders marked 'merge' in the review sheet.")
     p.add_argument("--review", help="Review sheet to apply (default: the newest one).")
+    p.add_argument("--only", metavar="LEVELS",
+                   help="With --apply: only these Confidence levels, e.g. --only high "
+                        "(or \"high,medium\").")
     p.add_argument("--names-only", action="store_true",
                    help="Don't read Xplan; compare on folder names and documents only.")
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")

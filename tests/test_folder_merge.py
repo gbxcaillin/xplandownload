@@ -107,3 +107,22 @@ def test_review_then_apply(tmp_path):
     # applying again finds nothing left to merge
     again = apply_merges(tmp_path, review, lambda m: None)
     assert again.merged == 0 and again.problems
+
+
+def test_apply_only_high(tmp_path):
+    _setup(tmp_path)
+    _, review = find_duplicates(tmp_path, None, lambda m: None)
+    wb = openpyxl.load_workbook(review)
+    ws = wb.active
+    head = [c.value for c in ws[1]]
+    for row in ws.iter_rows(min_row=2):
+        if row[head.index("Main folder")].value and "Mc" in str(
+                row[head.index("Main folder")].value):
+            row[head.index("Confidence")].value = "High"
+    wb.save(review)
+    r = apply_merges(tmp_path, review, lambda m: None, only=["high"])
+    assert r.merged == 1 and r.skipped == 1
+    assert (tmp_path / "Clients" / "Inactive" / "Alister Pillar (4036)").is_dir()
+    # the remade list only has what's left
+    proposals, _ = find_duplicates(tmp_path, None, lambda m: None)
+    assert [p.other.name for p in proposals] == ["Alister Pillar (4036)"]

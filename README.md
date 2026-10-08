@@ -133,6 +133,7 @@ re-uploaded.
 ```
 python -m xplan_extract merge-folders            # writes folder_merge_review_<date>.xlsx
 python -m xplan_extract merge-folders --apply    # merges the rows marked "merge"
+python -m xplan_extract merge-folders --apply --only high   # just the High-confidence rows
 ```
 
 Folders are grouped when their names match ignoring spaces, case and punctuation
