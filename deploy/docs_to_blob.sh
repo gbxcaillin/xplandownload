@@ -24,7 +24,7 @@ echo "==> Copying $SRC  ->  $DEST"
 echo "    Log: $LOG"
 rclone copy "$SRC" "$DEST" --exclude "Xplan Archive/**" \
   --transfers 8 --checkers 16 \
-  --azureblob-no-check-container \
+  \
   --retries 5 --low-level-retries 20 \
   --stats 30s --stats-one-line -P \
   --log-file "$LOG" --log-level INFO
