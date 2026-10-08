@@ -34,7 +34,7 @@ def loaded(tmp_path):
     e = sa.create_engine(f"sqlite:///{tmp_path / 'm.db'}")
     sa.event.listen(e, "connect", lambda c, _: c.execute("PRAGMA foreign_keys=ON"))
     db.create_all(e)
-    exp = write_export(tmp_path / "x", households=(HOUSEHOLD, DUP), prospects=(PROSPECT,),
+    exp = write_export(tmp_path / "x", family_groups=(HOUSEHOLD, DUP), prospects=(PROSPECT,),
                        entities=(ENTITY, ENT2), tasks=(TASK, TASK2))
     res = loader.load_export(e, exp, progress=lambda m: None)
     assert res.status == "loaded", res.problems

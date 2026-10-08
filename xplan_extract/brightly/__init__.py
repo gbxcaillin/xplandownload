@@ -277,7 +277,7 @@ class FactFind:
 # Output
 # --------------------------------------------------------------------------
 
-FILES = ("households", "prospects", "entities", "tasks")
+FILES = ("family_groups", "prospects", "entities", "tasks")
 
 
 @dataclass

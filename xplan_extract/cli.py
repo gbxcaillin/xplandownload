@@ -544,7 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_sql_args(p)
     p.set_defaults(func=cmd_documents)
 
-    p = sub.add_parser("brightly", help="Export family groups (households), entities and tasks in Brightly's "
+    p = sub.add_parser("brightly", help="Export family groups, entities and tasks in Brightly's "
                                         "record shape (JSON Lines).")
     p.add_argument("--out", default=env("BRIGHTLY_OUT"),
                    help="Secure export folder (default BRIGHTLY_OUT from .env).")

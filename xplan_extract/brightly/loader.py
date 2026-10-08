@@ -1,6 +1,7 @@
-"""Load a Brightly export (households/prospects/entities/tasks JSON Lines) into the database
+"""Load a Brightly export (family_groups/prospects/entities/tasks JSON Lines) into the database
 (step 3.3). A household record in the export is a family group in the database and in Brightly;
-the export keeps Brightly's interchange names (households.jsonl, H- ids).
+exports name the file family_groups.jsonl (older ones households.jsonl: still read); ids keep
+Brightly's H- prefix.
 
     stage    every line goes into staging_record with a new import_run
     validate counts match manifest.json; ids, references and dates hold; no TFNs anywhere
@@ -28,9 +29,10 @@ from . import scrub_tfns
 from . import database as db
 
 Progress = Callable[[str], None]
-FILES = {"household": "households.jsonl", "prospect": "prospects.jsonl",
+FILES = {"family_group": "family_groups.jsonl", "prospect": "prospects.jsonl",
          "entity": "entities.jsonl", "task": "tasks.jsonl"}
-PREFIX = {"household": "H-", "prospect": "H-", "entity": "E-", "task": "T-"}
+OLD_NAME = "households.jsonl"
+PREFIX = {"family_group": "H-", "prospect": "H-", "entity": "E-", "task": "T-"}
 BATCH = 500
 
 
@@ -57,6 +59,8 @@ def read_export(export_dir: Path) -> tuple[dict, dict[str, list[dict]]]:
     records: dict[str, list[dict]] = {}
     for kind, name in FILES.items():
         path = export_dir / name
+        if kind == "family_group" and not path.exists() and (export_dir / OLD_NAME).exists():
+            path = export_dir / OLD_NAME          # exports made before the rename
         rows = []
         if path.exists():
             with path.open(encoding="utf-8") as fh:
@@ -94,7 +98,7 @@ def _has_tfn(record: dict) -> bool:
     return hits[0] > 0
 
 
-DATE_FIELDS = {"household": ["since", "lastReview", "nextReview", "ofa", "insRenewal", "added"],
+DATE_FIELDS = {"family_group": ["since", "lastReview", "nextReview", "ofa", "insRenewal", "added"],
                "prospect": ["since", "lastReview", "nextReview", "ofa", "insRenewal", "added"],
                "entity": [], "task": ["due"]}
 
@@ -105,12 +109,14 @@ def validate(manifest: dict, records: dict[str, list[dict]], existing_households
     expected = manifest.get("record_counts", {})
     file_counts = file_counts or {k: len(v) for k, v in records.items()}
     for kind, name in FILES.items():
+        if kind == "family_group" and name not in expected and OLD_NAME in expected:
+            name = OLD_NAME
         if name in expected and expected[name] != file_counts[kind]:
             problems.append(f"{name}: manifest says {expected[name]} records, file has "
                             f"{file_counts[kind]}")
     seen: dict[str, str] = {}
     xplan_seen: dict[str, str] = {}
-    households = {r.get("id") for k in ("household", "prospect") for r in records[k]}
+    households = {r.get("id") for k in ("family_group", "prospect") for r in records[k]}
     known = households | existing_households
     for kind, rows in records.items():
         for n, r in enumerate(rows, 1):
@@ -124,7 +130,7 @@ def validate(manifest: dict, records: dict[str, list[dict]], existing_households
             seen[rid] = where
             xp = (r.get("ext") or {}).get("xplan")
             if xp and kind != "task":
-                key = ("H" if kind in ("household", "prospect") else "E") + str(xp)
+                key = ("H" if kind in ("family_group", "prospect") else "E") + str(xp)
                 if key in xplan_seen:
                     problems.append(f"{rid}: Xplan id also used by {xplan_seen[key]}")
                 xplan_seen[key] = rid
@@ -135,7 +141,7 @@ def validate(manifest: dict, records: dict[str, list[dict]], existing_households
                     problems.append(f"{rid}: {f} is not a YYYY-MM-DD date")
             if _has_tfn(r):
                 problems.append(f"{rid}: contains a number that passes the TFN check")
-            if kind in ("household", "prospect"):
+            if kind in ("family_group", "prospect"):
                 people = (r.get("profile") or {}).get("people") or []
                 want = 2 if r.get("type") == "Couple" else 1
                 if not people:
@@ -170,7 +176,7 @@ def redirect_merged(records: dict[str, list[dict]], merged: dict[str, str]) -> l
             i = merged[i]
         return i
     notes = []
-    for kind in ("household", "prospect", "entity"):
+    for kind in ("family_group", "prospect", "entity"):
         keep = []
         for r in records[kind]:
             if r.get("id") in merged:
@@ -353,7 +359,7 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
 
     # load
     with engine.begin() as conn:
-        hh = records["household"] + records["prospect"]
+        hh = records["family_group"] + records["prospect"]
         skip = set() if overwrite_edited else _edited(conn, db.family_group, [r["id"] for r in hh])
         skip |= set() if overwrite_edited else _edited(
             conn, db.entity, [r["id"] for r in records["entity"]])

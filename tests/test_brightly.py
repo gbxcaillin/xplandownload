@@ -62,10 +62,10 @@ def test_sensitive_fields_counted():
 
 def test_writer(tmp_path):
     w = ExportWriter(tmp_path, "test")
-    w.write("households", {"id": "H1", "notes": f"tfn {VALID_TFN}"})
+    w.write("family_groups", {"id": "H1", "notes": f"tfn {VALID_TFN}"})
     manifest = w.close("# readme")
-    line = json.loads((tmp_path / "households.jsonl").read_text())
+    line = json.loads((tmp_path / "family_groups.jsonl").read_text())
     assert TFN_MARK in line["notes"]
-    assert manifest["record_counts"]["households.jsonl"] == 1
+    assert manifest["record_counts"]["family_groups.jsonl"] == 1
     assert manifest["tfn_values_removed_from_text"] == 1
     assert (tmp_path / "unmapped.csv").read_text().startswith("xplan_table")

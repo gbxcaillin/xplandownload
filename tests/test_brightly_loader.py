@@ -52,10 +52,10 @@ TASK = {"id": "T-401", "t": "Book review", "c": "H-101", "who": "Pat Adviser",
         "due": "2027-03-14", "done": False}
 
 
-def write_export(path, households=(HOUSEHOLD,), prospects=(PROSPECT,), entities=(ENTITY,),
+def write_export(path, family_groups=(HOUSEHOLD,), prospects=(PROSPECT,), entities=(ENTITY,),
                  tasks=(TASK,), counts=None):
     path.mkdir(parents=True, exist_ok=True)
-    data = {"households.jsonl": households, "prospects.jsonl": prospects,
+    data = {"family_groups.jsonl": family_groups, "prospects.jsonl": prospects,
             "entities.jsonl": entities, "tasks.jsonl": tasks}
     for name, rows in data.items():
         (path / name).write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
@@ -117,8 +117,8 @@ def test_edited_record_is_left_alone(engine, tmp_path):
 
 def test_validation_blocks_tfn_and_bad_counts(engine, tmp_path):
     bad = dict(HOUSEHOLD, notes="TFN 123 456 782")   # passes the ATO check digit
-    exp = write_export(tmp_path / "export", households=(bad,),
-                       counts={"households.jsonl": 5})
+    exp = write_export(tmp_path / "export", family_groups=(bad,),
+                       counts={"family_groups.jsonl": 5})
     res = loader.load_export(engine, exp, progress=lambda m: None)
     assert res.status == "failed"
     text = " ".join(res.problems)
@@ -137,3 +137,13 @@ def test_ddl_for_both_databases():
     pg, ms = db.ddl("postgresql"), db.ddl("mssql")
     assert "JSONB" in pg and "append-only" in pg
     assert "NVARCHAR(max)" in ms and "CREATE TABLE family_group" in ms
+
+
+def test_old_export_name_still_loads(engine, tmp_path):
+    exp = write_export(tmp_path / "old")
+    (exp / "family_groups.jsonl").rename(exp / "households.jsonl")
+    m = json.loads((exp / "manifest.json").read_text())
+    m["record_counts"]["households.jsonl"] = m["record_counts"].pop("family_groups.jsonl")
+    (exp / "manifest.json").write_text(json.dumps(m))
+    res = loader.load_export(engine, exp, progress=lambda m: None)
+    assert res.status == "loaded" and loader.table_counts(engine)["family_group"] == 2

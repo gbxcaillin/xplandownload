@@ -111,7 +111,7 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
             h = builder.households[hid]
             record = builder.household_record(h, notes.get(hid, []), advice.get(hid, []),
                                               signed.get(hid, {}))
-            writer.write("prospects" if record.get("prospect") else "households", record)
+            writer.write("prospects" if record.get("prospect") else "family_groups", record)
         for e in entities:
             if builder.active is not None:
                 e["status"] = "Active" if (e["home"] in builder.active or any(
@@ -149,7 +149,7 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
                 f"- **Active / Inactive**: {matched} of {total} clients on the fee list were "
                 f"matched to a family group (`active_match.csv` shows how; unmatched ones say NO). "
                 f"{len(builder.active):,} family groups are \"Active\", the rest \"Inactive\" "
-                f"(prospects included). Family groups (households.jsonl), prospects, entities and tasks carry "
+                f"(prospects included). Family groups, prospects, entities and tasks carry "
                 f"`\"status\": \"Active\" | \"Inactive\"` - a field the brief doesn't define "
                 f"yet. **Brightly change needed:** hide `status = \"Inactive\"` records by "
                 f"default (lists, search results, portal); show them when the user filters on, "
@@ -175,7 +175,7 @@ Record counts, TFN and sensitive-field counts are in `manifest.json`.
 
 | Brightly | Xplan source |
 |---|---|
-| family group, `households.jsonl` (client = person 1, partner = person 2) | `entity_clients` (individuals); couples from `clientrelation_marrying` (subject = client) and `partner_entity_id` |
+| family group, `family_groups.jsonl` (client = person 1, partner = person 2) | `entity_clients` (individuals); couples from `clientrelation_marrying` (subject = client) and `partner_entity_id` |
 | family group id / `ext.xplan` | `H-<Xplan entity id of the client>`; ext.xplan = that id, so a re-run updates rather than duplicates |
 | name, people (name, DOB, job, income) | entity first/last name, `dob`; job and income from the primary `ufield_entity_employment` row (`ordinary_wages`) |
 | adviser | `client_adviser` ("Last, First" → "First Last") |
