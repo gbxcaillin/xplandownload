@@ -73,13 +73,13 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
         db = XplanDb(conn)
         data = XplanData(db, progress)
         builder = BrightlyBuilder(data, schema)
-        progress(f"Households: {len(builder.households):,} "
+        progress(f"Family groups: {len(builder.households):,} "
                  f"({sum(len(h.people) == 2 for h in builder.households.values()):,} couples)")
 
         for h in builder.households.values():
             builder.add_platform_accounts(h, [p.id for p in h.people])
         entities = builder.entity_records()
-        progress(f"SMSFs, trusts and companies with household roles: {len(entities):,}")
+        progress(f"SMSFs, trusts and companies with family group roles: {len(entities):,}")
         entity_home = {int(e["ext"]["xplan"]): e["home"] for e in entities}
         listed = None
         if active_list:
@@ -90,7 +90,7 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
                 progress(f"Using {len(confirmed)} answer(s) from {CONFIRM_FILE}")
             builder.active = match_active(listed, builder, entity_home, confirmed)
             progress(f"Active-clients list: {len(listed)} client(s) -> "
-                     f"{len(builder.active)} active household(s)")
+                     f"{len(builder.active)} active family group(s)")
             if diagnose_active:
                 from .active import diagnose
                 for line in diagnose(listed, builder, entity_home):
@@ -100,7 +100,7 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
                   else sorted(builder.households))
         wanted_set = set(wanted)
         if sample:
-            progress(f"SAMPLE: {len(wanted)} household(s)")
+            progress(f"SAMPLE: {len(wanted)} family group(s)")
 
         progress("File notes, advice history and signed documents ...")
         notes, advice, signed = build_notes(data, builder, wanted_set, entity_home, progress)
@@ -147,9 +147,9 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
             progress(f"{todo} client(s) to confirm: {confirm_path}")
             writer.notes.append(
                 f"- **Active / Inactive**: {matched} of {total} clients on the fee list were "
-                f"matched to a household (`active_match.csv` shows how; unmatched ones say NO). "
-                f"{len(builder.active):,} households are \"Active\", the rest \"Inactive\" "
-                f"(prospects included). Households, prospects, entities and tasks carry "
+                f"matched to a family group (`active_match.csv` shows how; unmatched ones say NO). "
+                f"{len(builder.active):,} family groups are \"Active\", the rest \"Inactive\" "
+                f"(prospects included). Family groups (households.jsonl), prospects, entities and tasks carry "
                 f"`\"status\": \"Active\" | \"Inactive\"` - a field the brief doesn't define "
                 f"yet. **Brightly change needed:** hide `status = \"Inactive\"` records by "
                 f"default (lists, search results, portal); show them when the user filters on, "
@@ -175,8 +175,8 @@ Record counts, TFN and sensitive-field counts are in `manifest.json`.
 
 | Brightly | Xplan source |
 |---|---|
-| household (client = person 1, partner = person 2) | `entity_clients` (individuals); couples from `clientrelation_marrying` (subject = client) and `partner_entity_id` |
-| household id / `ext.xplan` | `H-<Xplan entity id of the client>`; ext.xplan = that id, so a re-run updates rather than duplicates |
+| family group, `households.jsonl` (client = person 1, partner = person 2) | `entity_clients` (individuals); couples from `clientrelation_marrying` (subject = client) and `partner_entity_id` |
+| family group id / `ext.xplan` | `H-<Xplan entity id of the client>`; ext.xplan = that id, so a re-run updates rather than duplicates |
 | name, people (name, DOB, job, income) | entity first/last name, `dob`; job and income from the primary `ufield_entity_employment` row (`ordinary_wages`) |
 | adviser | `client_adviser` ("Last, First" → "First Last") |
 | since | `client_active_date`, else the record's `create_date` |
@@ -195,7 +195,7 @@ Record counts, TFN and sensitive-field counts are in `manifest.json`.
 | signed.atp | latest "Authority to Proceed" file note |
 | entities | SMSFs, trusts and companies with roles from the trustee, director, fund member, shareholder, beneficiary and settlor lists; a corporate trustee's directors get the Director role |
 | tasks | `sections_workflow_task` (Complete → done; Aborted tasks left out) |
-| prospects | households whose Xplan client status is Prospect |
+| prospects | family groups whose Xplan client status is Prospect |
 
 ## Decisions to confirm (Scott)
 
@@ -204,7 +204,7 @@ Record counts, TFN and sensitive-field counts are in `manifest.json`.
 - Trust type: {c.get('trust_type_assumed_family', 0)} trust(s) had no clear type and were exported as "Family trust".
 - SMSF trustee type text used: "Individual trustees" / "Corporate trustee" — check these match Brightly's options.
 - fee taken from last-12-month FDS receipts for {c.get('fee_from_fds', 0)} household(s).
-- Roles for people who aren't in any household were skipped ({c.get('roles_for_people_without_household', 0)}); structures with no household role skipped ({c.get('entities_without_household_roles', 0)}).
+- Roles for people who aren't in any family group were skipped ({c.get('roles_for_people_without_household', 0)}); structures with no family group role skipped ({c.get('entities_without_household_roles', 0)}).
 - {c.get('entities_linked_by_relationship', 0)} structure(s) had no trustee/director/member list and were linked through Xplan's general relationships instead (Trustee, Director, Super → Member ...); {c.get('relationship_role_unclear', 0)} link(s) had a label with no clear role (e.g. "Company", "Trust", "Family") and are shown as role "Associated".
 - TFN removal in text uses the ATO check digit; an unrelated 8–9 digit number (e.g. some account numbers) can pass it by chance and is also removed (Brightly would refuse it anyway).
 - Aborted tasks left out: {c.get('tasks_aborted_skipped', 0)}.

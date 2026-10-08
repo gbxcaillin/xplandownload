@@ -149,6 +149,22 @@ Brightly afterwards (`source = 'brightly'`) are kept, and records edited in Brig
 last import are left alone unless `--overwrite-edited` is given. The server stack that hosts
 the database is in `deploy/stack/`.
 
+### Duplicate family groups and entities (merge)
+
+Brightly calls a household a **family group**. When the same family group or entity exists
+twice, open the review page and merge them:
+
+```
+python -m xplan_extract merge-ui --db <url>         # then open http://127.0.0.1:8765
+```
+
+It lists likely duplicates (same name, email, phone, surname + date of birth, or ABN) and lines
+the two records up field by field, including each person and each fact-find answer. By default
+a filled value beats a blank one and, on a conflict, the record you keep wins; change any
+field's pick, or tick **Exclude** to keep the kept record's value as it is. Everything attached
+to the other record moves across, the merge is logged, and a later re-import from Xplan won't
+recreate the duplicate.
+
 ### Individual steps
 
 ```

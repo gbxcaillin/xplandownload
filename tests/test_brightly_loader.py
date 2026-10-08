@@ -78,26 +78,26 @@ def test_load_and_reload_keeps_brightly_rows(engine, tmp_path):
     res = loader.load_export(engine, exp, progress=lambda m: None)
     assert res.status == "loaded", res.problems
     counts = loader.table_counts(engine)
-    assert counts["household"] == 2 and counts["person"] == 3 and counts["account"] == 2
+    assert counts["family_group"] == 2 and counts["person"] == 3 and counts["account"] == 2
     assert counts["entity_role"] == 2 and counts["task"] == 1 and counts["file_note"] == 1
     with engine.connect() as c:
         assert c.execute(sa.select(db.account.c.entity_id).where(
             db.account.c.id == "H-101:A2")).scalar_one() == "E-301"
         ent = c.execute(sa.select(db.entity)).mappings().one()
         assert ent["tfn_held"] == "Yes" and ent["abn"] == "12 345 678 901"
-        assert c.execute(sa.select(db.household.c.status).where(
-            db.household.c.id == "H-202")).scalar_one() == "Inactive"
+        assert c.execute(sa.select(db.family_group.c.status).where(
+            db.family_group.c.id == "H-202")).scalar_one() == "Inactive"
 
     # a note added in Brightly after go-live must survive a re-import
     with engine.begin() as c:
-        c.execute(db.file_note.insert().values(household_id="H-101", title="New",
+        c.execute(db.file_note.insert().values(family_group_id="H-101", title="New",
                                                text="Added in Brightly", source="brightly"))
     res2 = loader.load_export(engine, exp, progress=lambda m: None)
     assert res2.status == "loaded"
     with engine.connect() as c:
         sources = sorted(r[0] for r in c.execute(sa.select(db.file_note.c.source)))
     assert sources == ["brightly", "xplan"]
-    assert loader.table_counts(engine)["household"] == 2  # updated, not duplicated
+    assert loader.table_counts(engine)["family_group"] == 2  # updated, not duplicated
 
 
 def test_edited_record_is_left_alone(engine, tmp_path):
@@ -105,14 +105,14 @@ def test_edited_record_is_left_alone(engine, tmp_path):
     exp = write_export(tmp_path / "export")
     loader.load_export(engine, exp, progress=lambda m: None)
     with engine.begin() as c:
-        c.execute(db.household.update().where(db.household.c.id == "H-101").values(
+        c.execute(db.family_group.update().where(db.family_group.c.id == "H-101").values(
             name="Renamed in Brightly",
             updated_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)))
     res = loader.load_export(engine, exp, progress=lambda m: None)
     assert any("edited in Brightly" in w for w in res.warnings)
     with engine.connect() as c:
-        assert c.execute(sa.select(db.household.c.name).where(
-            db.household.c.id == "H-101")).scalar_one() == "Renamed in Brightly"
+        assert c.execute(sa.select(db.family_group.c.name).where(
+            db.family_group.c.id == "H-101")).scalar_one() == "Renamed in Brightly"
 
 
 def test_validation_blocks_tfn_and_bad_counts(engine, tmp_path):
@@ -124,16 +124,16 @@ def test_validation_blocks_tfn_and_bad_counts(engine, tmp_path):
     text = " ".join(res.problems)
     assert "TFN" in text and "manifest says 5" in text
     assert "Sample" not in text  # problems name ids, never client names
-    assert loader.table_counts(engine)["household"] == 0
+    assert loader.table_counts(engine)["family_group"] == 0
 
 
 def test_dry_run_loads_nothing(engine, tmp_path):
     res = loader.load_export(engine, write_export(tmp_path / "e"), dry_run=True,
                              progress=lambda m: None)
-    assert res.status == "dry-run" and loader.table_counts(engine)["household"] == 0
+    assert res.status == "dry-run" and loader.table_counts(engine)["family_group"] == 0
 
 
 def test_ddl_for_both_databases():
     pg, ms = db.ddl("postgresql"), db.ddl("mssql")
     assert "JSONB" in pg and "append-only" in pg
-    assert "NVARCHAR(max)" in ms and "CREATE TABLE household" in ms
+    assert "NVARCHAR(max)" in ms and "CREATE TABLE family_group" in ms

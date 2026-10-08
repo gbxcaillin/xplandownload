@@ -59,7 +59,7 @@ age -d -i brightly-backup.key brightly-YYYYMMDD-HHMM.dump.age > restore.dump
 # 3. restore into a scratch database and compare counts with the live one
 docker compose exec -T db createdb -U brightly restore_test
 docker compose exec -T db pg_restore -U brightly -d restore_test --no-owner < restore.dump
-docker compose exec -T db psql -U brightly -d restore_test -c "select count(*) from household"
+docker compose exec -T db psql -U brightly -d restore_test -c "select count(*) from family_group"
 docker compose exec -T db dropdb -U brightly restore_test
 ```
 Record the date and result; delete `restore.dump` and the key file afterwards.

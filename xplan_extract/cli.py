@@ -267,6 +267,16 @@ def cmd_load(a) -> None:
     log("Table counts now: " + ", ".join(f"{k} {v:,}" for k, v in loader.table_counts(engine).items()))
 
 
+def cmd_merge_ui(a) -> None:
+    import sqlalchemy as sa
+    from .brightly import merge_ui
+
+    if not a.db:
+        raise SystemExit("Pass --db URL (or set BRIGHTLY_DB_URL in .env).")
+    merge_ui.serve(sa.create_engine(a.db), port=a.port, actor=a.actor or getpass.getuser(),
+                   progress=log)
+
+
 def cmd_backup(a) -> None:
     db = pick_database(a)
     path = sqlserver.backup_database(sql_config(a), db, a.dest, log)
@@ -534,7 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_sql_args(p)
     p.set_defaults(func=cmd_documents)
 
-    p = sub.add_parser("brightly", help="Export households, entities and tasks in Brightly's "
+    p = sub.add_parser("brightly", help="Export family groups (households), entities and tasks in Brightly's "
                                         "record shape (JSON Lines).")
     p.add_argument("--out", default=env("BRIGHTLY_OUT"),
                    help="Secure export folder (default BRIGHTLY_OUT from .env).")
@@ -543,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--active-list", default=env("BRIGHTLY_ACTIVE_LIST"),
                    help="Fees-by-client report (xlsx): records get \"status\": \"Active\" or \"Inactive\".")
     p.add_argument("--sample", type=int, default=0, metavar="N",
-                   help="Only N households (a couple, an SMSF, a trust ...) for checking.")
+                   help="Only N family groups (a couple, an SMSF, a trust ...) for checking.")
     p.add_argument("--active-check", action="store_true",
                    help="Explain (counts only, no names) why fee-list clients didn't match.")
     p.add_argument("--skip-unmapped", action="store_true",
@@ -621,6 +631,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overwrite-edited", action="store_true",
                    help="Also overwrite records edited in Brightly since their last import.")
     p.set_defaults(func=cmd_load)
+
+    p = sub.add_parser("merge-ui", help="Open the duplicate review page: compare two family "
+                                        "groups or entities side by side and merge them.")
+    p.add_argument("--db", default=env("BRIGHTLY_DB_URL"), help="SQLAlchemy database URL.")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--actor", help="Name recorded against each merge (default: your login).")
+    p.set_defaults(func=cmd_merge_ui)
 
     p = sub.add_parser("export", help="Export an already-restored database to Excel/JSON.")
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")

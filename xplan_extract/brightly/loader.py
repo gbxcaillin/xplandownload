@@ -1,13 +1,14 @@
 """Load a Brightly export (households/prospects/entities/tasks JSON Lines) into the database
-(step 3.3).
+(step 3.3). A household record in the export is a family group in the database and in Brightly;
+the export keeps Brightly's interchange names (households.jsonl, H- ids).
 
     stage    every line goes into staging_record with a new import_run
     validate counts match manifest.json; ids, references and dates hold; no TFNs anywhere
-    load     one transaction: upsert households/entities/tasks by id, rebuild their
+    load     one transaction: upsert family groups/entities/tasks by id, rebuild their
              source='xplan' child rows, append change_log entries
 
 Safe to re-run: records are matched by id, and child rows added in Brightly (source
-'brightly') are never touched. A household or entity edited in Brightly since its last import
+'brightly') are never touched. A family group (household record) or entity edited in Brightly since its last import
 (updated_at > imported_at) is left alone and reported, unless overwrite_edited=True.
 Problems name record ids only, never client names.
 """
@@ -98,14 +99,15 @@ DATE_FIELDS = {"household": ["since", "lastReview", "nextReview", "ofa", "insRen
                "entity": [], "task": ["due"]}
 
 
-def validate(manifest: dict, records: dict[str, list[dict]], existing_households: set[str]
-             ) -> tuple[list[str], list[str]]:
+def validate(manifest: dict, records: dict[str, list[dict]], existing_households: set[str],
+             file_counts: dict[str, int] | None = None) -> tuple[list[str], list[str]]:
     problems, warnings = [], []
     expected = manifest.get("record_counts", {})
+    file_counts = file_counts or {k: len(v) for k, v in records.items()}
     for kind, name in FILES.items():
-        if name in expected and expected[name] != len(records[kind]):
+        if name in expected and expected[name] != file_counts[kind]:
             problems.append(f"{name}: manifest says {expected[name]} records, file has "
-                            f"{len(records[kind])}")
+                            f"{file_counts[kind]}")
     seen: dict[str, str] = {}
     xplan_seen: dict[str, str] = {}
     households = {r.get("id") for k in ("household", "prospect") for r in records[k]}
@@ -144,19 +146,53 @@ def validate(manifest: dict, records: dict[str, list[dict]], existing_households
                     problems.append(f"{rid}: no name")
             elif kind == "entity":
                 if r.get("home") and r["home"] not in known:
-                    problems.append(f"{rid}: home household {r['home']} not found")
+                    problems.append(f"{rid}: home family group {r['home']} not found")
                 for role in r.get("roles") or []:
                     if role.get("c") not in known:
-                        problems.append(f"{rid}: role links unknown household {role.get('c')}")
+                        problems.append(f"{rid}: role links unknown family group {role.get('c')}")
                 if not r.get("name"):
                     problems.append(f"{rid}: no name")
             elif kind == "task":
                 if r.get("c") and r["c"] not in known:
-                    warnings.append(f"{rid}: household {r['c']} not found; task loads unlinked")
+                    warnings.append(f"{rid}: family group {r['c']} not found; task loads unlinked")
     return problems, warnings
 
 
 # -- loading -------------------------------------------------------------------------------
+
+def redirect_merged(records: dict[str, list[dict]], merged: dict[str, str]) -> list[str]:
+    """Records merged away in Brightly stay merged: skip them and point links at the record
+    they were merged into."""
+    def final(i):
+        seen = set()
+        while i in merged and i not in seen:
+            seen.add(i)
+            i = merged[i]
+        return i
+    notes = []
+    for kind in ("household", "prospect", "entity"):
+        keep = []
+        for r in records[kind]:
+            if r.get("id") in merged:
+                notes.append(f"{r['id']}: merged into {final(r['id'])} in Brightly; not re-imported")
+            else:
+                keep.append(r)
+        records[kind] = keep
+    for e in records["entity"]:
+        if e.get("home"):
+            e["home"] = final(e["home"])
+        for ro in e.get("roles") or []:
+            ro["c"] = final(ro.get("c"))
+        for a in e.get("accts") or []:
+            a["c"] = final(a.get("c"))
+        if e.get("primary") and ":" in e["primary"]:
+            c, pk = e["primary"].rsplit(":", 1)
+            e["primary"] = f"{final(c)}:{pk}"
+    for t in records["task"]:
+        if t.get("c"):
+            t["c"] = final(t["c"])
+    return notes
+
 
 def _num(v: Any):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
@@ -180,43 +216,43 @@ def _household_row(r: dict, now, run_id) -> dict:
 
 def _household_children(r: dict) -> dict[sa.Table, list[dict]]:
     hid, p = r["id"], r.get("profile") or {}
-    rows: dict[sa.Table, list[dict]] = {t: [] for t in db.HOUSEHOLD_CHILDREN}
+    rows: dict[sa.Table, list[dict]] = {t: [] for t in db.FAMILY_GROUP_CHILDREN}
     rows[db.person] = [
-        {"id": f"{hid}:{i}", "household_id": hid, "position": i, "name": x.get("n"),
+        {"id": f"{hid}:{i}", "family_group_id": hid, "position": i, "name": x.get("n"),
          "role": x.get("role"), "dob": _date(x.get("dob")), "occupation": x.get("job"),
          "income": _num(x.get("income"))}
         for i, x in enumerate(p.get("people") or [], 1)]
     c = r.get("contacts") or {}
     rows[db.contact_point] = (
-        [{"household_id": hid, "kind": "email", "value": e["addr"], "is_primary": bool(e.get("primary"))}
+        [{"family_group_id": hid, "kind": "email", "value": e["addr"], "is_primary": bool(e.get("primary"))}
          for e in c.get("emails") or [] if e.get("addr")] +
-        [{"household_id": hid, "kind": "phone", "value": ph["num"], "is_primary": bool(ph.get("primary"))}
+        [{"family_group_id": hid, "kind": "phone", "value": ph["num"], "is_primary": bool(ph.get("primary"))}
          for ph in c.get("phones") or [] if ph.get("num")])
     rows[db.account] = [
-        {"id": f"{hid}:{a.get('id')}", "household_id": hid, "source_ref": a.get("id"),
+        {"id": f"{hid}:{a.get('id')}", "family_group_id": hid, "source_ref": a.get("id"),
          "platform": a.get("p"), "product": a.get("prod"), "kind": a.get("kind"),
          "owner": a.get("owner"), "balance": _num(a.get("bal")), "as_at": _date(a.get("asAt")),
          "member_no": a.get("member"), "insurance": a.get("ins") or None}
         for a in p.get("accounts") or []]
     for kind, key in (("asset", "assets"), ("liability", "liabs")):
         rows[db.asset_liability] += [
-            {"household_id": hid, "kind": kind, "name": x[0] if len(x) > 0 else None,
+            {"family_group_id": hid, "kind": kind, "name": x[0] if len(x) > 0 else None,
              "owner": x[1] if len(x) > 1 else None, "value": _num(x[2]) if len(x) > 2 else None}
             for x in p.get(key) or []]
     meta = p.get("goalMeta") or []
     rows[db.goal] = [
-        {"household_id": hid, "position": i, "text": g,
+        {"family_group_id": hid, "position": i, "text": g,
          "date": _date((meta[i] if i < len(meta) else {}).get("date")),
          "origin": (meta[i] if i < len(meta) else {}).get("source")}
         for i, g in enumerate(p.get("goals") or []) if g]
     rows[db.advice_history] = [
-        {"household_id": hid, "date": _date(a.get("date")), "document": a.get("document"),
+        {"family_group_id": hid, "date": _date(a.get("date")), "document": a.get("document"),
          "scope": a.get("scope"), "summary": a.get("summary")} for a in p.get("adviceHist") or []]
     rows[db.file_note] = [
-        {"household_id": hid, "at": _stamp(n.get("at")), "author": n.get("by"),
+        {"family_group_id": hid, "at": _stamp(n.get("at")), "author": n.get("by"),
          "title": n.get("title"), "text": n.get("text")} for n in r.get("fileNotes") or []]
     rows[db.signed_document] = [
-        {"household_id": hid, "doc_key": k, "date": _date(v.get("date")), "signed_by": v.get("by"),
+        {"family_group_id": hid, "doc_key": k, "date": _date(v.get("date")), "signed_by": v.get("by"),
          "note": v.get("note")} for k, v in (r.get("signed") or {}).items() if isinstance(v, dict)]
     return rows
 
@@ -225,7 +261,7 @@ def _entity_row(r: dict, now, run_id) -> dict:
     ff = dict(r.get("ff") or {})
     s = r.get("strategy") or {}
     return {"id": r["id"], "xplan_id": (r.get("ext") or {}).get("xplan"), "type": r.get("type"),
-            "name": r["name"], "status": r.get("status"), "home_household_id": r.get("home"),
+            "name": r["name"], "status": r.get("status"), "home_family_group_id": r.get("home"),
             "primary_ref": r.get("primary"), "abn": ff.pop("abn", None),
             "tfn_held": ff.pop("tfnHeld", None), "details": ff,
             "strategy_profile": s.get("profile"), "strategy_reviewed": _date(s.get("reviewed")),
@@ -269,7 +305,10 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
     res = Result()
     now = dt.datetime.now(dt.timezone.utc)
     with engine.connect() as conn:
-        existing_h = {r[0] for r in conn.execute(sa.select(db.household.c.id))}
+        existing_h = {r[0] for r in conn.execute(sa.select(db.family_group.c.id))}
+        merged = {r.dropped_id: r.kept_id for r in conn.execute(
+            sa.select(db.merge_record.c.dropped_id, db.merge_record.c.kept_id))}
+    file_counts = {k: len(v) for k, v in records.items()}
     progress("Records: " + ", ".join(f"{len(v):,} {k}" for k, v in records.items()))
 
     # stage
@@ -292,7 +331,9 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
     progress(f"Staged as import run {res.run_id}.")
 
     # validate
-    res.problems, res.warnings = validate(manifest, records, existing_h)
+    redirected = redirect_merged(records, merged) if merged else []
+    res.problems, res.warnings = validate(manifest, records, existing_h, file_counts)
+    res.warnings = redirected + res.warnings
     for w in res.warnings[:20]:
         progress(f"  warning: {w}")
     if res.problems:
@@ -313,7 +354,7 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
     # load
     with engine.begin() as conn:
         hh = records["household"] + records["prospect"]
-        skip = set() if overwrite_edited else _edited(conn, db.household, [r["id"] for r in hh])
+        skip = set() if overwrite_edited else _edited(conn, db.family_group, [r["id"] for r in hh])
         skip |= set() if overwrite_edited else _edited(
             conn, db.entity, [r["id"] for r in records["entity"]])
         if skip:
@@ -321,22 +362,22 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
                                 f"were left alone: {', '.join(sorted(skip)[:20])}")
         hh = [r for r in hh if r["id"] not in skip]
         ids = [r["id"] for r in hh]
-        existing = _existing(conn, db.household, ids)
-        _upsert(conn, db.household, [_household_row(r, now, res.run_id) for r in hh], existing)
-        res.counts["households"] = len(hh)
+        existing = _existing(conn, db.family_group, ids)
+        _upsert(conn, db.family_group, [_household_row(r, now, res.run_id) for r in hh], existing)
+        res.counts["family_groups"] = len(hh)
 
-        children: dict[sa.Table, list[dict]] = {t: [] for t in [db.person, *db.HOUSEHOLD_CHILDREN]}
+        children: dict[sa.Table, list[dict]] = {t: [] for t in [db.person, *db.FAMILY_GROUP_CHILDREN]}
         for r in hh:
             for t, rows in _household_children(r).items():
                 children[t] += rows
         for i in range(0, len(ids), BATCH):
             chunk = ids[i:i + BATCH]
-            for t in db.HOUSEHOLD_CHILDREN:
-                conn.execute(t.delete().where(t.c.household_id.in_(chunk), t.c.source == "xplan"))
+            for t in db.FAMILY_GROUP_CHILDREN:
+                conn.execute(t.delete().where(t.c.family_group_id.in_(chunk), t.c.source == "xplan"))
         # people: keep ids stable for entity_role links; upsert then drop extras
         pexist = _existing(conn, db.person, [p["id"] for p in children[db.person]])
         _upsert(conn, db.person, children[db.person], pexist)
-        for t in db.HOUSEHOLD_CHILDREN:
+        for t in db.FAMILY_GROUP_CHILDREN:
             rows = children[t]
             for i in range(0, len(rows), BATCH):
                 conn.execute(t.insert(), rows[i:i + BATCH])
@@ -354,7 +395,7 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
         for r in ents:
             for ro in r.get("roles") or []:
                 pk = str(ro.get("pk") or "")
-                roles.append({"entity_id": r["id"], "household_id": ro["c"], "person_pos": pk or None,
+                roles.append({"entity_id": r["id"], "family_group_id": ro["c"], "person_pos": pk or None,
                               "person_id": f"{ro['c']}:{pk}" if pk else None,
                               "roles": ro.get("roles") or [], "member_balance": _num(ro.get("bal")),
                               "is_primary": r.get("primary") == f"{ro['c']}:{pk}"})
@@ -371,8 +412,8 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
         res.counts["entities"] = len(ents)
         res.counts["entity_role"] = len(roles)
 
-        known = set(ids) | {r[0] for r in conn.execute(sa.select(db.household.c.id))}
-        trows = [{"id": t["id"], "household_id": t.get("c") if t.get("c") in known else None,
+        known = set(ids) | {r[0] for r in conn.execute(sa.select(db.family_group.c.id))}
+        trows = [{"id": t["id"], "family_group_id": t.get("c") if t.get("c") in known else None,
                   "text": t.get("t") or "Task", "who": t.get("who"), "due": _date(t.get("due")),
                   "done": bool(t.get("done")), "status": t.get("status"),
                   "imported_at": now, "updated_at": now} for t in records["task"]]
@@ -384,7 +425,7 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
             for e in r.get("log") or [{"at": now.isoformat(), "by": "Xplan import",
                                        "kind": "Imported", "m": "Imported from Xplan"}]:
                 logs.append({"at": _stamp(e.get("at")) or now, "actor": e.get("by"),
-                             "record_type": "entity" if r["id"].startswith("E-") else "household",
+                             "record_type": "entity" if r["id"].startswith("E-") else "family_group",
                              "record_id": r["id"], "kind": e.get("kind"),
                              "message": f"{e.get('m') or ''} (import run {res.run_id})".strip()})
         for i in range(0, len(logs), BATCH):

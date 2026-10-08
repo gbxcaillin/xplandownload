@@ -295,7 +295,7 @@ def write_report(listed: list[ListedClient], path: Path) -> tuple[int, int]:
     matched = 0
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
-        w.writerow(["listed_client", "matched", "how", "brightly_household_ids", "policies",
+        w.writerow(["listed_client", "matched", "how", "brightly_family_group_ids", "policies",
                     "crm_references"])
         for c in listed:
             matched += bool(c.households)
@@ -363,7 +363,7 @@ def diagnose(listed: list[ListedClient], builder, entity_home: dict[int, str]) -
                     kind = e.type or "unknown type"
                     in_clients = "in" if ref in d.clients else "not in"
                     reasons[f"CRM Reference is an Xplan {kind} {in_clients} the client list, "
-                            f"not part of a household"] += 1
+                            f"not part of a family group"] += 1
             continue
         name = c.name
         words = re.findall(r"[A-Za-z']+", name)
@@ -379,7 +379,7 @@ def diagnose(listed: list[ListedClient], builder, entity_home: dict[int, str]) -
             if surnames.get(last.lower()):
                 reasons["surname exists in Xplan, but no exact first-name match"] += 1
             else:
-                reasons["surname not found in any Xplan household"] += 1
+                reasons["surname not found in any Xplan family group"] += 1
     lines += [f"  {n:>4}  {r}" for r, n in reasons.most_common()]
     report = Counter(_shape(p) for c in unmatched for p in c.policies)
     xplan = Counter(_shape(_norm_policy(r.get("policy_number")))
@@ -399,7 +399,7 @@ def unmatched_reason(c: ListedClient, builder, entity_home: dict[int, str],
         e = d.entities.get(ref)
         if e is None:
             return f"CRM Reference {ref} is not in this Xplan extract"
-        return f"CRM Reference {ref} is an Xplan {e.type or 'record'} not linked to a household"
+        return f"CRM Reference {ref} is an Xplan {e.type or 'record'} not linked to a family group"
     name = c.name
     words = re.findall(r"[A-Za-z']+", name)
     if re.search(r"pty|ltd|limited|trust|super|fund|smsf|atf|holdings|investments", name, re.I):
@@ -474,7 +474,7 @@ def write_confirm_workbook(listed: list[ListedClient], builder, entity_home: dic
 
     ws2 = wb.add_worksheet("Check these matches")
     heads2 = ["Client on fee list", "Fees (12 months, inc GST)", "Matched how",
-              "Matched to (Brightly household)", CONFIRM_COLUMN, "Notes"]
+              "Matched to (Brightly family group)", CONFIRM_COLUMN, "Notes"]
     for i, h in enumerate(heads2):
         ws2.write(0, i, h, bold)
     unsure = [c for c in listed if c.households and (
