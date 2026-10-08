@@ -1,0 +1,111 @@
+# Brightly live stack for the VPS (step 4.2). Everything the internet can reach goes through
+# Caddy (HTTPS) and then oauth2-proxy (Microsoft Entra sign-in); the app and the database sit
+# on an internal network with no published ports. Settings come from .env (see .env.example).
+#
+#   docker compose up -d            start / update
+#   docker compose logs -f caddy    watch the front door
+#   docker compose run --rm backup now     take a backup immediately
+#
+# Moving to Azure later: the app image moves to Container Apps / App Service, the database to
+# Azure Database for PostgreSQL (restore the latest backup), and Entra sign-in carries over.
+
+name: brightly
+
+services:
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    depends_on: [auth]
+
+  auth:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+    restart: unless-stopped
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: Microsoft
+      OAUTH2_PROXY_OIDC_ISSUER_URL: https://login.microsoftonline.com/${ENTRA_TENANT_ID:?set ENTRA_TENANT_ID}/v2.0
+      OAUTH2_PROXY_CLIENT_ID: ${ENTRA_CLIENT_ID:?set ENTRA_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${ENTRA_CLIENT_SECRET:?set ENTRA_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${COOKIE_SECRET:?set COOKIE_SECRET}
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_COOKIE_SAMESITE: lax
+      OAUTH2_PROXY_COOKIE_EXPIRE: 12h
+      OAUTH2_PROXY_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:?set ALLOWED_EMAIL_DOMAINS}
+      OAUTH2_PROXY_SCOPE: openid email profile
+      OAUTH2_PROXY_REDIRECT_URL: https://${DOMAIN}/oauth2/callback
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_UPSTREAMS: http://app:${APP_PORT:-3000}
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"      # app reads X-Forwarded-Email / -User
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true"  # Entra work accounts send no email_verified claim
+    networks: [edge, internal]
+    depends_on: [app]
+
+  app:
+    # Until the Brightly image exists this placeholder echoes the request, so sign-in can be
+    # tested end to end. Then set BRIGHTLY_IMAGE in .env.
+    image: ${BRIGHTLY_IMAGE:-traefik/whoami:v1.10.3}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://brightly:${POSTGRES_PASSWORD}@db:5432/brightly
+      WHOAMI_PORT_NUMBER: ${APP_PORT:-3000}
+      PORT: ${APP_PORT:-3000}
+    networks: [internal]
+    depends_on:
+      db: { condition: service_healthy }
+
+  db:
+    image: postgres:16.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: brightly
+      POSTGRES_DB: brightly
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - ${DB_DATA_DIR:-/srv/brightly/pgdata}:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brightly -d brightly"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    shm_size: 256mb
+
+  backup:
+    build: ./backup
+    restart: unless-stopped
+    environment:
+      PGHOST: db
+      PGUSER: brightly
+      PGDATABASE: brightly
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:?set BACKUP_AGE_RECIPIENT (age public key)}
+      AZURE_BACKUP_SAS_URL: ${AZURE_BACKUP_SAS_URL:?set AZURE_BACKUP_SAS_URL}
+      BACKUP_HOUR: ${BACKUP_HOUR:-2}
+      TZ: Australia/Melbourne
+    volumes:
+      - ${BACKUP_SPOOL_DIR:-/srv/brightly/backup-spool}:/spool
+    networks: [internal, egress]
+    depends_on:
+      db: { condition: service_healthy }
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edge: {}
+  internal:
+    internal: true    # no route to the internet; the database is reachable only from here
+  egress: {}           # backup uploads to Azure

@@ -222,6 +222,51 @@ def cmd_restore(a) -> None:
     step_restore(a.bak, a)
 
 
+def cmd_schema_sql(a) -> None:
+    from .brightly import database
+    text = database.ddl(a.dialect)
+    if a.out:
+        Path(a.out).write_text(text, encoding="utf-8")
+        log(f"Written: {a.out}")
+    else:
+        print(text)
+
+
+def cmd_load(a) -> None:
+    import sqlalchemy as sa
+    from .brightly import database, loader
+
+    if not a.db:
+        raise SystemExit("Pass --db URL (or set BRIGHTLY_DB_URL in .env), e.g. "
+                         "postgresql+psycopg://brightly:...@localhost:5432/brightly")
+    if not a.export:
+        raise SystemExit("Pass --export FOLDER: the Brightly export folder (with manifest.json).")
+    engine = sa.create_engine(a.db)
+    if a.create_schema:
+        database.create_all(engine)
+        log("Tables created (or already there).")
+    try:
+        res = loader.load_export(engine, Path(a.export), dry_run=a.dry_run,
+                                 overwrite_edited=a.overwrite_edited, progress=log)
+    except loader.LoadError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+    if res.problems:
+        log(f"\nImport run {res.run_id} FAILED validation - nothing was loaded:")
+        for p in res.problems[:50]:
+            log(f"  - {p}")
+        if len(res.problems) > 50:
+            log(f"  ... and {len(res.problems) - 50} more (stored on the import_run row)")
+        raise SystemExit(1)
+    if res.status == "dry-run":
+        log(f"\nDry run {res.run_id}: everything checks out; nothing loaded. "
+            f"Warnings: {len(res.warnings)}")
+        return
+    log(f"\nImport run {res.run_id} loaded: " + ", ".join(f"{v:,} {k}" for k, v in res.counts.items()))
+    for w in res.warnings[:20]:
+        log(f"  warning: {w}")
+    log("Table counts now: " + ", ".join(f"{k} {v:,}" for k, v in loader.table_counts(engine).items()))
+
+
 def cmd_backup(a) -> None:
     db = pick_database(a)
     path = sqlserver.backup_database(sql_config(a), db, a.dest, log)
@@ -558,6 +603,24 @@ def build_parser() -> argparse.ArgumentParser:
                                   "(default: SQL Server's backup folder).")
     add_sql_args(p)
     p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("schema-sql", help="Print the draft Brightly database schema as SQL "
+                                          "(for review; creates nothing).")
+    p.add_argument("--dialect", choices=["postgresql", "mssql", "sqlite"], default="postgresql")
+    p.add_argument("--out", help="Write to this file instead of the screen.")
+    p.set_defaults(func=cmd_schema_sql)
+
+    p = sub.add_parser("load", help="Load a Brightly export into the Brightly database "
+                                    "(stage, validate, then load; safe to re-run).")
+    p.add_argument("--export", default=env("BRIGHTLY_OUT"), help="Export folder (manifest.json).")
+    p.add_argument("--db", default=env("BRIGHTLY_DB_URL"), help="SQLAlchemy database URL.")
+    p.add_argument("--create-schema", action="store_true",
+                   help="Create the tables first if they don't exist (only once the database "
+                        "choice is confirmed).")
+    p.add_argument("--dry-run", action="store_true", help="Stage and validate only.")
+    p.add_argument("--overwrite-edited", action="store_true",
+                   help="Also overwrite records edited in Brightly since their last import.")
+    p.set_defaults(func=cmd_load)
 
     p = sub.add_parser("export", help="Export an already-restored database to Excel/JSON.")
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")

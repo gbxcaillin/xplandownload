@@ -131,6 +131,24 @@ tests the archive, uploads it with AzCopy (sign in with your Microsoft account) 
 Azure's MD5 against the local one. `ARCHIVE_INDEX.json` in the staging folder records what was
 archived. Re-running skips finished steps.
 
+### Brightly database (draft schema and loader)
+
+The database choice (PostgreSQL or Azure SQL) is still Scott's call, so nothing is created
+unless you ask. The same schema works on both.
+
+```
+python -m xplan_extract schema-sql --dialect postgresql --out schema.postgresql.sql   # review
+python -m xplan_extract schema-sql --dialect mssql      --out schema.mssql.sql
+python -m xplan_extract load --db <url> --export <export folder> --create-schema --dry-run
+python -m xplan_extract load --db <url> --export <export folder>
+```
+
+`load` stages every record, checks counts against `manifest.json`, ids, links, dates and
+TFNs, and only then loads in one transaction. Re-running updates records by id; rows added in
+Brightly afterwards (`source = 'brightly'`) are kept, and records edited in Brightly since the
+last import are left alone unless `--overwrite-edited` is given. The server stack that hosts
+the database is in `deploy/stack/`.
+
 ### Individual steps
 
 ```
