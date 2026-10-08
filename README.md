@@ -105,6 +105,29 @@ For a OneDrive-synced SharePoint folder (Files On-Demand on), each file is marke
 online-only so OneDrive frees the local copy after uploading, and the export pauses while
 free disk space is below `--min-free-gb` (default 10). Re-running skips files already saved.
 
+### Active / Inactive client folders and the clients to confirm
+
+```
+python -m xplan_extract confirm-list                 # refresh active_clients_to_confirm.xlsx
+python -m xplan_extract split-folders                # preview: writes folder_split_preview_*.csv
+python -m xplan_extract split-folders --apply        # move the folders
+```
+
+Both read the fees-by-client report (`BRIGHTLY_ACTIVE_LIST`) and the restored database.
+
+`confirm-list` rebuilds `active_clients_to_confirm.xlsx` next to the fee report, keeping
+whatever is already typed in the *Confirmed Xplan ID* and *Notes* columns (the old file is
+kept as `…backup-<date>.xlsx`). A **Status** column shows each client as answered,
+waiting, or needing a check. Answers are Xplan IDs (a comma between two) or "not in Xplan".
+
+`split-folders` moves each `Clients/<name> (<id>)` folder into `Clients/Active` or
+`Clients/Inactive`. A client is Active when they or their family group match the fee list,
+including Scott's answers. Folders are identified through `documents_index.csv`, which is
+updated to the new paths (a copy of the old one is kept). Folders starting with `_` stay
+where they are. Re-running is safe: after more answers come in, folders move back as
+needed. Inside a synced SharePoint folder a move is a rename, so nothing is downloaded or
+re-uploaded.
+
 ### Archive to Azure Blob storage
 
 Keeps an encrypted, checked copy of the raw Iress zip (and, separately, the exports) in Azure.

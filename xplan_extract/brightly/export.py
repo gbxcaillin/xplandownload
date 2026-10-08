@@ -138,12 +138,13 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
             cur.execute(f"SELECT COUNT(*) FROM {qname(t)} WHERE {tfn_like_sql(col)}")
             writer.tfn_fields_dropped += int(cur.fetchone()[0])
         if listed is not None:
-            from .active import CONFIRM_FILE, write_confirm_workbook, write_report
+            from .active import CONFIRM_FILE, read_answers, write_confirm_workbook, write_report
             matched, total = write_report(listed, out_dir / "active_match.csv")
             confirm_path = active_list.parent / CONFIRM_FILE
+            answers = read_answers(confirm_path)
             if confirm_path.exists():
                 confirm_path = out_dir / CONFIRM_FILE  # never overwrite Scott's answers
-            todo = write_confirm_workbook(listed, builder, entity_home, confirm_path)
+            todo = write_confirm_workbook(listed, builder, entity_home, confirm_path, answers)
             progress(f"{todo} client(s) to confirm: {confirm_path}")
             writer.notes.append(
                 f"- **Active / Inactive**: {matched} of {total} clients on the fee list were "

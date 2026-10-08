@@ -54,3 +54,58 @@ def test_initial_keys():
     assert initial_keys("CITIZEN J") == ["citizen|j"]
     assert initial_keys("Mrs J. Citizen") == ["citizen|j"]
     assert "Sam Citizen" in name_variants("Jane Citizen & Sam Citizen")
+
+
+def test_parse_answer():
+    from xplan_extract.brightly.active import parse_answer
+    assert parse_answer("101, 102") == ["101", "102"]
+    assert parse_answer("not in Xplan") == [] and parse_answer("N/A") == []
+    assert parse_answer("") is None and parse_answer("ask Jo") is None
+
+
+def test_confirm_workbook_keeps_answers(tmp_path):
+    from types import SimpleNamespace
+
+    from xplan_extract.brightly.active import (ListedClient, read_answers, read_confirmed,
+                                               write_confirm_workbook)
+
+    person = SimpleNamespace(f={"last_name": "Citizen"}, name="Jane Citizen", id=101)
+    builder = SimpleNamespace(
+        households={"hh-1": SimpleNamespace(people=[person],
+                                            record_entity=SimpleNamespace(name="Citizen"))},
+        d=SimpleNamespace(entities={}))
+    a = ListedClient("Citizen, J", fees=10)
+    b = ListedClient("Nobody, Ann", fees=5)
+    c = ListedClient("Maybe, Max", fees=1)
+    path = tmp_path / "confirm.xlsx"
+    assert write_confirm_workbook([a, b, c], builder, {}, path) == 3
+
+    wb = openpyxl.load_workbook(path)
+    ws = wb["To confirm"]
+    head = [h.value for h in ws[1]]
+    for row in ws.iter_rows(min_row=2):
+        name = row[0].value
+        if name == "Citizen, J":
+            row[head.index("Confirmed Xplan ID")].value = "101"
+            row[head.index("Notes")].value = "goes by Jo"
+        elif name == "Nobody, Ann":
+            row[head.index("Confirmed Xplan ID")].value = "not in Xplan"
+    wb.save(path)
+    assert read_confirmed(path) == {"Citizen, J": ["101"], "Nobody, Ann": []}
+
+    # refresh: Citizen is now matched (from the answer) but stays on the list, answered
+    a.households, a.method = {"hh-1"}, "Confirmed by Scott"
+    b.method = "Confirmed: not in Xplan"
+    answers = read_answers(path)
+    out = tmp_path / "confirm2.xlsx"
+    assert write_confirm_workbook([a, b, c], builder, {}, out, answers) == 1
+    ws = openpyxl.load_workbook(out)["To confirm"]
+    head = [h.value for h in ws[1]]
+    rows = {r[0]: r for r in ws.iter_rows(min_row=2, values_only=True) if r[1] is not None}
+    assert set(rows) == {"Citizen, J", "Nobody, Ann", "Maybe, Max"}
+    status = head.index("Status")
+    assert rows["Citizen, J"][head.index("Notes")] == "goes by Jo"
+    assert rows["Citizen, J"][status].startswith("Answered: matched to 1 family group")
+    assert rows["Nobody, Ann"][status].startswith("Answered: not in Xplan")
+    assert rows["Maybe, Max"][status] == "Waiting for an answer"
+    assert read_confirmed(out) == {"Citizen, J": ["101"], "Nobody, Ann": []}

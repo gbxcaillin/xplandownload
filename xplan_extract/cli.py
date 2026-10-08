@@ -355,6 +355,78 @@ def cmd_documents(a) -> None:
         log(f"  {len(stats.errors):,} file(s) could not be saved, e.g. {stats.errors[0]}")
 
 
+def _fee_list(a) -> Path:
+    if not a.active_list:
+        raise SystemExit("Pass --active-list (the fees-by-client report) or set "
+                         "BRIGHTLY_ACTIVE_LIST in .env.")
+    path = Path(a.active_list)
+    if not path.is_file():
+        raise SystemExit(f"Active-clients list not found: {path}")
+    return path
+
+
+def cmd_confirm_list(a) -> None:
+    from .brightly.active import refresh_confirm_workbook
+
+    path = _fee_list(a)
+    db = pick_database(a)
+    log("Matching the fee list to Xplan (this reads the whole database, a few minutes) ...")
+    try:
+        r = refresh_confirm_workbook(sql_config(a).engine(db), path, log)
+    except PermissionError as exc:
+        raise SystemExit(str(exc))
+    log("")
+    log(f"Updated: {r['path']}")
+    if r["backup"]:
+        log(f"  previous version kept as {r['backup'].name}")
+    log(f"  {r['matched']} of {r['listed']} fee-list clients matched; "
+        f"{r['active_family_groups']:,} family groups Active")
+    log(f"  To confirm: {r['on_list']}  answered {r['answered']}, waiting {r['waiting']}, "
+        f"to check {r['to_check']} (see the Status column)")
+
+
+def cmd_split_folders(a) -> None:
+    from . import folders
+    from .brightly.active import compute_active, unanswered
+
+    if not a.dest:
+        raise SystemExit("Pass --dest (the folder holding Clients\\) or set DOCUMENTS_DEST in .env.")
+    dest = Path(a.dest)
+    if not (dest / "Clients").is_dir():
+        raise SystemExit(f"No Clients folder in {dest}")
+    path = _fee_list(a)
+    db = pick_database(a)
+    log("Working out active clients from the fee list (a few minutes) ...")
+    active_ids, listed = compute_active(sql_config(a).engine(db), path, log)
+    waiting = unanswered(listed)
+    log(f"  {sum(1 for c in listed if c.households)} of {len(listed)} fee-list clients matched; "
+        f"{len(active_ids):,} Xplan clients/structures are Active")
+    if waiting:
+        log(f"  {len(waiting)} fee-list client(s) still unconfirmed: their folders count as "
+            "Inactive for now. Re-run after the answers are in; folders move back if needed.")
+    log(("Moving folders ..." if a.apply else "PREVIEW - nothing will be moved.")
+        + f" {dest / 'Clients'}")
+    r = folders.split_folders(dest, active_ids, apply=a.apply, progress=log)
+    log("")
+    verb = "Moved" if a.apply else "Would move"
+    log(f"{verb} {r.count('move'):,} folder(s): {r.count('move', 'Active'):,} to Active, "
+        f"{r.count('move', 'Inactive'):,} to Inactive")
+    log(f"Already in the right place: {r.count('stays'):,}")
+    if r.count("check"):
+        log(f"No Xplan id, left where they are: {r.count('check'):,} (see the plan file)")
+    shared = sum(1 for p in r.plans if p.note.startswith("Shared"))
+    if shared:
+        log(f"Shared by an active and an inactive client, kept with Active: {shared:,}")
+    if r.errors:
+        log(f"Problems: {len(r.errors):,} folder(s), e.g. {r.errors[0].error} "
+            "(a file open or still syncing? re-run to retry)")
+    if r.index_rows_updated:
+        log(f"documents_index.csv updated ({r.index_rows_updated:,} rows; old copy kept)")
+    log(f"Plan: {r.plan_file}")
+    if not a.apply:
+        log("Check the plan, then run again with --apply to move the folders.")
+
+
 def cmd_brightly(a) -> None:
     from .brightly.export import UnsafeDestination, check_destination, export_brightly
 
@@ -543,6 +615,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")
     add_sql_args(p)
     p.set_defaults(func=cmd_documents)
+
+    p = sub.add_parser("confirm-list", help="Refresh active_clients_to_confirm.xlsx (the fee-list "
+                                            "clients to confirm), keeping the answers already in it.")
+    p.add_argument("--active-list", default=env("BRIGHTLY_ACTIVE_LIST"),
+                   help="Fees-by-client report (xlsx); the workbook sits next to it.")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_confirm_list)
+
+    p = sub.add_parser("split-folders", help="Sort the saved client folders into Clients\\Active "
+                                             "and Clients\\Inactive (preview unless --apply).")
+    p.add_argument("--dest", default=env("DOCUMENTS_DEST"),
+                   help="Folder holding Clients\\ (default DOCUMENTS_DEST from .env).")
+    p.add_argument("--active-list", default=env("BRIGHTLY_ACTIVE_LIST"),
+                   help="Fees-by-client report (xlsx); Scott's answers are read from "
+                        "active_clients_to_confirm.xlsx next to it.")
+    p.add_argument("--apply", action="store_true", help="Move the folders (default: preview).")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_split_folders)
 
     p = sub.add_parser("brightly", help="Export family groups, entities and tasks in Brightly's "
                                         "record shape (JSON Lines).")

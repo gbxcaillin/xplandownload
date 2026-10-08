@@ -12,6 +12,8 @@ Each block is matched to an Xplan client, strongest evidence first:
 from __future__ import annotations
 
 import csv
+import datetime as dt
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -170,9 +172,12 @@ def read_active_list(path: Path) -> list[ListedClient]:
     return clients
 
 
-def read_confirmed(path: Path) -> dict[str, list[str]]:
-    """Scott's answers: listed client name -> Xplan ids, or [] for "not in Xplan"."""
-    out: dict[str, list[str]] = {}
+NOT_IN_XPLAN = re.compile(r"^\s*(not\b.*|none|n/?a|no|-+)\s*$", re.I)
+
+
+def read_answers(path: Path | None) -> dict[str, dict[str, tuple[str, str]]]:
+    """Everything typed into the confirm workbook: sheet -> client name -> (answer, notes)."""
+    out: dict[str, dict[str, tuple[str, str]]] = {}
     if not path or not Path(path).is_file():
         return out
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -182,10 +187,35 @@ def read_confirmed(path: Path) -> dict[str, list[str]]:
         if CONFIRM_COLUMN not in head or "Client on fee list" not in head:
             continue
         ci, ni = head.index(CONFIRM_COLUMN), head.index("Client on fee list")
+        oi = head.index("Notes") if "Notes" in head else None
+        sheet = out.setdefault(ws.title, {})
         for r in rows:
-            name, answer = _cell(r[ni]) if ni < len(r) else "", _cell(r[ci]) if ci < len(r) else ""
-            if name and answer:
-                out[name] = re.findall(r"\d+", answer)
+            name = _cell(r[ni]) if ni < len(r) else ""
+            if not name or name.startswith(("How to answer", "Only fill in")):
+                continue
+            answer = _cell(r[ci]) if ci < len(r) else ""
+            notes = _cell(r[oi]) if oi is not None and oi < len(r) else ""
+            sheet[name] = (answer, notes)
+    wb.close()
+    return out
+
+
+def parse_answer(answer: str) -> list[str] | None:
+    """Xplan ids, [] for "not in Xplan", or None when it isn't an answer we understand."""
+    ids = re.findall(r"\d+", answer or "")
+    if ids:
+        return ids
+    return [] if answer and NOT_IN_XPLAN.match(answer) else None
+
+
+def read_confirmed(path: Path) -> dict[str, list[str]]:
+    """Scott's answers: listed client name -> Xplan ids, or [] for "not in Xplan"."""
+    out: dict[str, list[str]] = {}
+    for sheet in read_answers(path).values():
+        for name, (answer, _notes) in sheet.items():
+            ids = parse_answer(answer)
+            if ids is not None:
+                out[name] = ids
     return out
 
 
@@ -314,8 +344,8 @@ def active_entity_ids(builder, entities: list[dict], households: set[str]) -> se
     return ids
 
 
-def compute_active(engine, list_path: Path, progress=print):
-    """For the documents export: (active entity ids, listed clients) from the fee report."""
+def active_context(engine, list_path: Path, progress=print):
+    """Read Xplan and the fee list and match them, applying Scott's answers so far."""
     from .xplan_map import BrightlyBuilder, XplanData, XplanDb
 
     raw = engine.raw_connection()
@@ -326,11 +356,24 @@ def compute_active(engine, list_path: Path, progress=print):
         entities = builder.entity_records()
         entity_home = {int(e["ext"]["xplan"]): e["home"] for e in entities}
         listed = read_active_list(list_path)
-        households = match_active(listed, builder, entity_home,
-                                  read_confirmed(list_path.parent / CONFIRM_FILE))
-        return active_entity_ids(builder, entities, households), listed
+        confirmed = read_confirmed(list_path.parent / CONFIRM_FILE)
+        if confirmed:
+            progress(f"Using {len(confirmed)} answer(s) from {CONFIRM_FILE}")
+        households = match_active(listed, builder, entity_home, confirmed)
+        return builder, entities, entity_home, listed, households
     finally:
         raw.close()
+
+
+def compute_active(engine, list_path: Path, progress=print):
+    """For the documents export: (active entity ids, listed clients) from the fee report."""
+    builder, entities, _home, listed, households = active_context(engine, list_path, progress)
+    return active_entity_ids(builder, entities, households), listed
+
+
+def unanswered(listed: list[ListedClient]) -> list[ListedClient]:
+    """Fee-list clients still unmatched and without an answer from Scott."""
+    return [c for c in listed if not c.households and not c.method.startswith("Confirmed")]
 
 
 def _shape(value: str) -> str:
@@ -415,11 +458,36 @@ def unmatched_reason(c: ListedClient, builder, entity_home: dict[int, str],
     return "Name not found in Xplan (not in this database, or spelt differently?)"
 
 
+def answer_status(c: ListedClient, answer: str) -> str:
+    if not answer:
+        return ("Matched automatically now (Active)" if c.households
+                else "Waiting for an answer")
+    ids = parse_answer(answer)
+    if ids is None:
+        return "Answer not understood: put Xplan ID(s) or 'not in Xplan'"
+    if not ids:
+        return "Answered: not in Xplan (Inactive)"
+    if c.households:
+        n = len(c.households)
+        return f"Answered: matched to {n} family group{'s' if n > 1 else ''} (Active)"
+    return "Answered, but that Xplan ID isn't a client here: please check"
+
+
 def write_confirm_workbook(listed: list[ListedClient], builder, entity_home: dict[int, str],
-                           path: Path) -> int:
-    """Clients for Scott to confirm, plus the less certain automatic matches."""
+                           path: Path,
+                           answers: dict[str, dict[str, tuple[str, str]]] | None = None
+                           ) -> int:
+    """Clients for Scott to confirm, plus the less certain automatic matches.
+
+    ``answers`` (from ``read_answers`` on the previous workbook) are written back in, so a
+    refreshed workbook keeps what Scott already filled in, and clients he answered stay on
+    the list with their status.
+    """
     import xlsxwriter
 
+    answers = answers or {}
+    asked = answers.get("To confirm", {})
+    checked = answers.get("Check these matches", {})
     surnames: dict[str, list[str]] = {}
     for hid, hh in builder.households.items():
         for p in hh.people:
@@ -447,46 +515,60 @@ def write_confirm_workbook(listed: list[ListedClient], builder, entity_home: dic
     bold = wb.add_format({"bold": True, "bg_color": "#DDEBF7", "border": 1, "text_wrap": True})
     money = wb.add_format({"num_format": "$#,##0.00"})
     fill = wb.add_format({"bg_color": "#FFF2CC", "border": 1})
+    done = wb.add_format({"font_color": "#375623"})
+    wait = wb.add_format({"font_color": "#9C5700", "bold": True})
     ws = wb.add_worksheet("To confirm")
     heads = ["Client on fee list", "Fees (12 months, inc GST)", "Why it didn't match",
-             "Possible Xplan matches (same surname)", CONFIRM_COLUMN, "Notes"]
+             "Possible Xplan matches (same surname)", CONFIRM_COLUMN, "Notes", "Status"]
     for i, h in enumerate(heads):
         ws.write(0, i, h, bold)
-    todo = [c for c in listed if not c.households]
+    # unmatched now, plus everyone already on the list (answered ones stay, with their status)
+    todo = [c for c in listed if not c.households or c.name in asked]
+    waiting = 0
     for r, c in enumerate(sorted(todo, key=lambda c: -c.fees), 1):
+        answer, notes = asked.get(c.name, ("", ""))
+        status = answer_status(c, answer)
+        waiting += not answer or parse_answer(answer) is None
         ws.write(r, 0, c.name)
         ws.write_number(r, 1, round(c.fees, 2), money)
         ws.write(r, 2, unmatched_reason(c, builder, entity_home, surnames))
         ws.write(r, 3, candidates(c))
-        ws.write_blank(r, 4, None, fill)
-        ws.write_blank(r, 5, None)
+        ws.write_string(r, 4, answer, fill)
+        ws.write_string(r, 5, notes)
+        ws.write(r, 6, status, done if status.startswith(("Answered:", "Matched")) else wait)
     ws.set_column(0, 0, 38)
     ws.set_column(1, 1, 14)
     ws.set_column(2, 2, 48)
     ws.set_column(3, 3, 70)
     ws.set_column(4, 4, 20)
     ws.set_column(5, 5, 30)
+    ws.set_column(6, 6, 44)
     ws.freeze_panes(1, 1)
+    ws.autofilter(0, 0, max(len(todo), 1), len(heads) - 1)
     note_row = len(todo) + 2
     ws.write(note_row, 0, f"How to answer: put the client's Xplan ID in '{CONFIRM_COLUMN}' "
              "(two IDs separated by a comma for a couple), or write 'not in Xplan'. "
-             "The next export reads this file and uses the answers.")
+             "Matched clients become Active; 'not in Xplan' ones stay Inactive. "
+             "The Status column is filled in each time the list is refreshed.")
 
     ws2 = wb.add_worksheet("Check these matches")
     heads2 = ["Client on fee list", "Fees (12 months, inc GST)", "Matched how",
               "Matched to (Brightly family group)", CONFIRM_COLUMN, "Notes"]
     for i, h in enumerate(heads2):
         ws2.write(0, i, h, bold)
-    unsure = [c for c in listed if c.households and (
-        c.method.startswith(("Surname", "Name, ignoring")) or len(c.households) > 1)]
+    unsure = [c for c in listed if c.households and c.name not in asked and (
+        c.method.startswith(("Surname", "Name, ignoring")) or len(c.households) > 1
+        or c.name in checked)]
     for r, c in enumerate(sorted(unsure, key=lambda c: -c.fees), 1):
         names = "; ".join(f"{builder.households[h].record_entity.name if h in builder.households else h}"
                           f" ({h})" for h in sorted(c.households))
+        answer, notes = checked.get(c.name, ("", ""))
         ws2.write(r, 0, c.name)
         ws2.write_number(r, 1, round(c.fees, 2), money)
         ws2.write(r, 2, c.method)
         ws2.write(r, 3, names)
-        ws2.write_blank(r, 4, None, fill)
+        ws2.write_string(r, 4, answer, fill)
+        ws2.write_string(r, 5, notes)
     ws2.set_column(0, 0, 38)
     ws2.set_column(1, 1, 14)
     ws2.set_column(2, 2, 34)
@@ -496,4 +578,43 @@ def write_confirm_workbook(listed: list[ListedClient], builder, entity_home: dic
     ws2.write(len(unsure) + 2, 0, "Only fill in the yellow column if a match is wrong: put the "
               "right Xplan ID, or 'not in Xplan'.")
     wb.close()
-    return len(todo)
+    return waiting
+
+
+def refresh_confirm_workbook(engine, list_path: Path, progress=print) -> dict:
+    """Rebuild active_clients_to_confirm.xlsx in place, keeping Scott's answers.
+
+    The previous workbook is kept as a dated backup next to it.
+    """
+    import shutil
+
+    path = list_path.parent / CONFIRM_FILE
+    answers = read_answers(path)
+    builder, entities, entity_home, listed, households = active_context(engine, list_path,
+                                                                        progress)
+    backup = None
+    if path.exists():
+        stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = path.with_name(f"{path.stem}.backup-{stamp}{path.suffix}")
+        try:
+            shutil.copy2(path, backup)
+        except PermissionError:
+            raise PermissionError(f"{path.name} is open (in Excel?). Close it and try again.")
+    tmp = path.with_name(f"~new-{path.name}")
+    write_confirm_workbook(listed, builder, entity_home, tmp, answers)
+    try:
+        os.replace(tmp, path)
+    except PermissionError:
+        tmp.unlink(missing_ok=True)
+        raise PermissionError(f"{path.name} is open (in Excel?). Close it and try again.")
+    asked = answers.get("To confirm", {})
+    on_list = [c for c in listed if not c.households or c.name in asked]
+    statuses = [answer_status(c, asked.get(c.name, ("", ""))[0]) for c in on_list]
+    return {
+        "path": path, "backup": backup, "on_list": len(on_list),
+        "answered": sum(s.startswith("Answered:") for s in statuses),
+        "waiting": sum(s.startswith("Waiting") for s in statuses),
+        "to_check": sum(not s.startswith(("Answered:", "Waiting", "Matched")) for s in statuses),
+        "listed": len(listed), "matched": sum(1 for c in listed if c.households),
+        "active_family_groups": len(households),
+    }
