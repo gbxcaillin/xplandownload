@@ -427,6 +427,63 @@ def cmd_split_folders(a) -> None:
         log("Check the plan, then run again with --apply to move the folders.")
 
 
+def cmd_merge_folders(a) -> None:
+    from . import folder_merge
+
+    if not a.dest:
+        raise SystemExit("Pass --dest (the folder holding Clients\\) or set DOCUMENTS_DEST in .env.")
+    dest = Path(a.dest)
+    if not (dest / "Clients").is_dir():
+        raise SystemExit(f"No Clients folder in {dest}")
+    if a.apply:
+        review = Path(a.review) if a.review else folder_merge.latest_review(dest)
+        if not review or not review.is_file():
+            raise SystemExit("No review sheet found: run merge-folders without --apply first.")
+        log(f"Merging the folders marked 'merge' in {review.name} ...")
+        try:
+            r = folder_merge.apply_merges(dest, review, log)
+        except PermissionError:
+            raise SystemExit(f"{review.name} is open (in Excel?). Close it and try again.")
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        log("")
+        log(f"Merged {r.merged:,} folder(s); {r.kept:,} marked keep were left alone")
+        log(f"  files moved {r.files_moved:,}; exact duplicates removed {r.duplicates_removed:,} "
+            f"(SharePoint recycle bin); renamed '(from <id>)' {r.renamed:,}")
+        if r.index_rows_updated:
+            log(f"  documents_index.csv updated ({r.index_rows_updated:,} rows; old copy kept)")
+        if r.problems:
+            log(f"  Problems: {len(r.problems):,}, e.g. {r.problems[0]} "
+                "(a file open or still syncing? re-run --apply to retry)")
+        log(f"Log: {r.log_file}")
+        return
+
+    data = None
+    if not a.names_only:
+        from .brightly.xplan_map import XplanData, XplanDb
+        db = pick_database(a)
+        log("Reading Xplan for dates of birth, contact details and addresses ...")
+        raw = sql_config(a).engine(db).raw_connection()
+        conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
+        try:
+            data = XplanData(XplanDb(conn), log)
+        finally:
+            raw.close()
+    proposals, path = folder_merge.find_duplicates(dest, data, log)
+    from collections import Counter
+    levels = Counter(p.level for p in proposals)
+    groups = len({p.group for p in proposals})
+    log("")
+    log(f"Possible duplicates: {groups:,} group(s), {len(proposals):,} folder(s) to merge in")
+    for level in ("High", "Medium", "Name only", "Different people?"):
+        if levels[level]:
+            decision = "keep" if level == "Different people?" else "merge"
+            log(f"  {level:<18} {levels[level]:>5}  (pre-filled: {decision})")
+    log(f"Review: {path}")
+    log("Check it (change Decision to 'keep' where they're different people), then run "
+        "merge-folders --apply")
+
+
 def cmd_brightly(a) -> None:
     from .brightly.export import UnsafeDestination, check_destination, export_brightly
 
@@ -635,6 +692,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--database", help="SQL Server database (default: the only one restored).")
     add_sql_args(p)
     p.set_defaults(func=cmd_split_folders)
+
+    p = sub.add_parser("merge-folders", help="Find client folders that are the same person "
+                                             "under two Xplan records, and merge them "
+                                             "(review sheet first, then --apply).")
+    p.add_argument("--dest", default=env("DOCUMENTS_DEST"),
+                   help="Folder holding Clients\\ (default DOCUMENTS_DEST from .env).")
+    p.add_argument("--apply", action="store_true",
+                   help="Merge the folders marked 'merge' in the review sheet.")
+    p.add_argument("--review", help="Review sheet to apply (default: the newest one).")
+    p.add_argument("--names-only", action="store_true",
+                   help="Don't read Xplan; compare on folder names and documents only.")
+    p.add_argument("--database", help="SQL Server database (default: the only one restored).")
+    add_sql_args(p)
+    p.set_defaults(func=cmd_merge_folders)
 
     p = sub.add_parser("brightly", help="Export family groups, entities and tasks in Brightly's "
                                         "record shape (JSON Lines).")

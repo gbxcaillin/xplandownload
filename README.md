@@ -128,6 +128,27 @@ where they are. Re-running is safe: after more answers come in, folders move bac
 needed. Inside a synced SharePoint folder a move is a rename, so nothing is downloaded or
 re-uploaded.
 
+### Duplicate client folders (same person, two Xplan records)
+
+```
+python -m xplan_extract merge-folders            # writes folder_merge_review_<date>.xlsx
+python -m xplan_extract merge-folders --apply    # merges the rows marked "merge"
+```
+
+Folders are grouped when their names match ignoring spaces, case and punctuation
+("Mc Donough" = "Mcdonough"), or when the clients share a surname and date of birth. Each
+extra folder is checked against the group's main folder (Active first, then the most files)
+using Xplan: the same date of birth, email, phone or address count as evidence, as do the same
+documents filed under both. Different dates of birth, first or middle names, a person vs a
+trust, or the two being partners count as conflicts. Conflicts are pre-filled "keep" and
+everything else "merge"; change the Decision column before applying.
+
+Merging moves the files into the main folder. A file that is the very same Xplan document as
+one already there is removed (it goes to the SharePoint recycle bin), and a different file with
+the same name becomes "<name> (from <id>)". `documents_index.csv` follows every move, and
+`folder_merge_done_<date>.csv` logs what was merged. The Brightly records stay separate until
+they are merged with `merge-ui` after loading.
+
 ### Archive to Azure Blob storage
 
 Keeps an encrypted, checked copy of the raw Iress zip (and, separately, the exports) in Azure.
