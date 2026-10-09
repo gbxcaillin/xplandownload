@@ -62,10 +62,34 @@ def choose_sample(builder: BrightlyBuilder, entities: list[dict], size: int) -> 
     return picked
 
 
+def links_within(e: dict, wanted: set[str], counts: dict | None = None) -> dict:
+    """An entity with only its links to the family groups in this load (sample or phase 1);
+    the full load later adds the rest. If its home family group isn't loaded yet, it points
+    at the first one that is."""
+    e = {**e, "roles": [r for r in e["roles"] if r["c"] in wanted],
+         "accts": [a for a in e.get("accts") or [] if a["c"] in wanted]}
+    if e.get("primary") and e["primary"].split(":")[0] not in wanted:
+        e["primary"] = None
+    if e["home"] not in wanted and e["roles"]:
+        e["home"] = e["roles"][0]["c"]
+        if counts is not None:
+            counts["entity_home_moved_for_phase"] += 1
+    return e
+
+
 def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, source: str,
                     sample: int = 0, progress: Progress = print,
                     active_list: Path | None = None, skip_unmapped: bool = False,
-                    diagnose_active: bool = False) -> dict:
+                    diagnose_active: bool = False, phase: str = "all",
+                    include_prospects: bool = False) -> dict:
+    """phase "active": only the Active family groups (and the entities, notes and tasks that
+    belong to them), for a staged roll-in; a later "all" export loads the rest on top."""
+    if phase not in ("all", "active"):
+        raise ValueError(f"Unknown phase {phase!r}")
+    if phase == "active" and not active_list:
+        raise ValueError("--phase active needs the fees-by-client report (--active-list)")
+    if phase == "active" and sample:
+        raise ValueError("Use either --sample or --phase active, not both")
     schema = Schema(schema_path)
     raw = engine.raw_connection()
     conn = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection
@@ -98,6 +122,12 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
 
         wanted = (choose_sample(builder, entities, sample) if sample
                   else sorted(builder.households))
+        if phase == "active":
+            wanted = [h for h in wanted if h in builder.active or (
+                include_prospects and builder.is_prospect(builder.households[h]))]
+            progress(f"PHASE 1 (Active only): {len(wanted):,} family group(s)"
+                     + (" incl. prospects" if include_prospects else "")
+                     + f"; {len(builder.households) - len(wanted):,} left for phase 2")
         wanted_set = set(wanted)
         if sample:
             progress(f"SAMPLE: {len(wanted)} family group(s)")
@@ -117,9 +147,8 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
                 e["status"] = "Active" if (e["home"] in builder.active or any(
                     r["c"] in builder.active for r in e["roles"])) else "Inactive"
             if e["home"] in wanted_set or any(r["c"] in wanted_set for r in e["roles"]):
-                if sample:  # keep only the sampled households' links
-                    e = {**e, "roles": [r for r in e["roles"] if r["c"] in wanted_set],
-                         "accts": [a for a in e["accts"] if a["c"] in wanted_set]}
+                if sample or phase == "active":
+                    e = links_within(e, wanted_set, builder.counts)
                 writer.write("entities", e)
         for t in tasks:
             if builder.active is not None:
@@ -155,8 +184,18 @@ def export_brightly(engine: sa.Engine, out_dir: Path, schema_path: str | None, s
                 f"yet. **Brightly change needed:** hide `status = \"Inactive\"` records by "
                 f"default (lists, search results, portal); show them when the user filters on, "
                 f"or searches for, \"inactive\".")
+        if phase == "active":
+            writer.notes.append(
+                f"- **Phase 1 (Active only)**: {len(wanted):,} family groups"
+                f"{' plus prospects' if include_prospects else ''}; the other "
+                f"{len(builder.households) - len(wanted):,} come in phase 2 (a full export "
+                f"loaded on top, which skips records already edited in Brightly). Entities "
+                f"shared with an inactive family group carry only their active links for now; "
+                f"{builder.counts.get('entity_home_moved_for_phase', 0)} entit(ies) whose home "
+                f"family group is inactive point at their active family group until phase 2.")
         manifest = writer.close(_readme(builder, writer, sample, wanted))
         manifest["sample"] = bool(sample)
+        manifest["phase"] = phase
         return manifest
     finally:
         raw.close()

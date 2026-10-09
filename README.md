@@ -194,6 +194,27 @@ Brightly afterwards (`source = 'brightly'`) are kept, and records edited in Brig
 last import are left alone unless `--overwrite-edited` is given. The server stack that hosts
 the database is in `deploy/stack/`.
 
+### Staged roll-in: Active clients first
+
+```
+python -m xplan_extract brightly --phase active          # phase 1: export_<date>_active
+python -m xplan_extract load --export "...\export_<date>_active" --dry-run
+python -m xplan_extract load --export "...\export_<date>_active"
+# later, phase 2: everything, loaded on top
+python -m xplan_extract brightly
+python -m xplan_extract load --export "...\export_<date>"
+```
+
+Phase 1 holds only the Active family groups (from the fee list and Scott's answers), their
+file notes, advice history and tasks, and the SMSFs, trusts and companies they belong to.
+An entity shared with an inactive family group carries only its active links for now. If its
+home family group is inactive, it points at its active family group until phase 2. Add
+`--include-prospects` to bring prospects in with phase 1.
+
+Phase 2 is a normal full export. Loading it adds the inactive family groups and the remaining
+links. Records already edited in Brightly are skipped (`--overwrite-edited` to force), so work
+done since phase 1 is kept.
+
 ### Duplicate family groups and entities (merge)
 
 Brightly calls a household a **family group**. When the same family group or entity exists

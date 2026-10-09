@@ -511,14 +511,19 @@ def cmd_brightly(a) -> None:
         raise SystemExit(str(exc))
     db = pick_database(a)
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = out / (f"sample_{stamp}" if a.sample else f"export_{stamp}")
+    out = out / (f"sample_{stamp}" if a.sample else
+                 f"export_{stamp}_active" if a.phase == "active" else f"export_{stamp}")
     log(f"Writing Brightly export to {out}")
     active = Path(a.active_list) if a.active_list else None
     if active and not active.is_file():
         raise SystemExit(f"Active-clients list not found: {active}")
-    m = export_brightly(sql_config(a).engine(db), out, a.schema, db, a.sample, progress=log,
-                        active_list=active, skip_unmapped=a.skip_unmapped,
-                        diagnose_active=a.active_check)
+    try:
+        m = export_brightly(sql_config(a).engine(db), out, a.schema, db, a.sample, progress=log,
+                            active_list=active, skip_unmapped=a.skip_unmapped,
+                            diagnose_active=a.active_check, phase=a.phase,
+                            include_prospects=a.include_prospects)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     log("")
     for k, v in m["record_counts"].items():
         log(f"  {k}: {v:,}")
@@ -737,6 +742,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Only N family groups (a couple, an SMSF, a trust ...) for checking.")
     p.add_argument("--active-check", action="store_true",
                    help="Explain (counts only, no names) why fee-list clients didn't match.")
+    p.add_argument("--phase", choices=["all", "active"], default="all",
+                   help="active = staged roll-in: only Active family groups and what belongs to "
+                        "them (phase 1); all = everything (phase 2 / one go). Default all.")
+    p.add_argument("--include-prospects", action="store_true",
+                   help="With --phase active: also export prospects.")
     p.add_argument("--skip-unmapped", action="store_true",
                    help="Skip the scan for unmapped Xplan fields (faster repeat samples).")
     p.add_argument("--allow-any-destination", action="store_true",

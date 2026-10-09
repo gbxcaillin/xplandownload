@@ -147,3 +147,39 @@ def test_old_export_name_still_loads(engine, tmp_path):
     (exp / "manifest.json").write_text(json.dumps(m))
     res = loader.load_export(engine, exp, progress=lambda m: None)
     assert res.status == "loaded" and loader.table_counts(engine)["family_group"] == 2
+
+
+def test_staged_roll_in_active_then_all(engine, tmp_path):
+    """Phase 1 loads only the active family group; phase 2 (everything) loads on top."""
+    from collections import Counter
+
+    from xplan_extract.brightly.export import links_within
+
+    inactive = {**HOUSEHOLD, "id": "H-102", "ext": {"xplan": "102"}, "name": "Old Client",
+                "status": "Inactive"}
+    shared = {**ENTITY, "home": "H-102",
+              "roles": ENTITY["roles"] + [{"c": "H-102", "pk": "1", "roles": ["Member"],
+                                           "bal": 1}],
+              "primary": "H-102:1", "accts": ENTITY["accts"] + [{"c": "H-102", "id": "A9"}]}
+    counts = Counter()
+    phase1 = links_within(shared, {"H-101"}, counts)
+    assert phase1["home"] == "H-101" and counts["entity_home_moved_for_phase"] == 1
+    assert {r["c"] for r in phase1["roles"]} == {"H-101"} and phase1["primary"] is None
+    assert shared["home"] == "H-102"                      # the original is untouched
+
+    loader.load_export(engine, write_export(tmp_path / "p1", family_groups=(HOUSEHOLD,),
+                                            prospects=(), entities=(phase1,)),
+                       progress=lambda m: None)
+    with engine.connect() as c:
+        assert c.execute(sa.text("select count(*) from family_group")).scalar() == 1
+        roles1 = c.execute(sa.text("select count(*) from entity_role")).scalar()
+
+    loader.load_export(engine, write_export(tmp_path / "p2", family_groups=(HOUSEHOLD, inactive),
+                                            entities=(shared,)),
+                       progress=lambda m: None)
+    with engine.connect() as c:
+        assert c.execute(sa.text("select count(*) from family_group")).scalar() == 3  # + prospect
+        assert c.execute(sa.text("select count(*) from entity")).scalar() == 1
+        assert c.execute(sa.text("select count(*) from entity_role")).scalar() > roles1
+        home = c.execute(sa.text("select home_family_group_id from entity")).scalar()
+    assert home == "H-102"
