@@ -60,6 +60,24 @@ CREATE TABLE IF NOT EXISTS audit (
     detail TEXT,
     ip TEXT
 );
+CREATE TABLE IF NOT EXISTS reviews (
+    id TEXT PRIMARY KEY,
+    link_id TEXT NOT NULL REFERENCES links(id),
+    status TEXT NOT NULL,             -- queued | running | done | failed
+    file_ids TEXT NOT NULL,           -- JSON list
+    requested_by TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    pdf_key_enc BLOB,
+    pdf_size INTEGER,
+    sharepoint_url TEXT,
+    summary TEXT,
+    error TEXT,
+    cost_usd REAL
+);
+CREATE INDEX IF NOT EXISTS reviews_status ON reviews(status, requested_at);
 -- the audit trail is append-only
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit
 BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
@@ -95,7 +113,12 @@ class Store:
                                   isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
+        self.db.execute("PRAGMA busy_timeout = 10000")   # the reviewer shares this file
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(files)")}
+        if "review_id" not in cols:
+            self.db.execute("ALTER TABLE files ADD COLUMN review_id TEXT")
+        (data_dir / "reviews").mkdir(exist_ok=True)
 
     # -- helpers -----------------------------------------------------------
     def _one(self, sql: str, *args) -> sqlite3.Row | None:
@@ -229,6 +252,85 @@ class Store:
         path.unlink(missing_ok=True)
         self._run("UPDATE files SET deleted_at = ?, deleted_by = ? WHERE id = ?",
                   iso(now()), actor, f["id"])
+
+    # -- AI reviews ----------------------------------------------------------
+    def enqueue_review(self, link_id: str, requested_by: str) -> dict | None:
+        """Queue a review of the link's files not reviewed yet. None when there's nothing new
+        (or a review is already waiting)."""
+        import json
+        with self.lock:
+            waiting = self.db.execute("SELECT id FROM reviews WHERE link_id = ? AND status IN "
+                                      "('queued', 'running')", (link_id,)).fetchone()
+            if waiting:
+                return None
+            ids = [r[0] for r in self.db.execute(
+                "SELECT id FROM files WHERE link_id = ? AND deleted_at IS NULL AND "
+                "review_id IS NULL ORDER BY uploaded_at", (link_id,))]
+            if not ids:
+                return None
+            review_id = secrets.token_hex(8)
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.db.execute("INSERT INTO reviews (id, link_id, status, file_ids, "
+                                "requested_by, requested_at) VALUES (?,?,?,?,?,?)",
+                                (review_id, link_id, "queued", json.dumps(ids), requested_by,
+                                 iso(now())))
+                self.db.executemany("UPDATE files SET review_id = ? WHERE id = ?",
+                                    [(review_id, i) for i in ids])
+                self.db.execute("COMMIT")
+            except Exception:
+                self.db.execute("ROLLBACK")
+                raise
+        self.audit(requested_by, "review queued", link_id, detail=f"{len(ids)} file(s)")
+        return self.review(review_id)
+
+    def review(self, review_id: str) -> dict | None:
+        row = self._one("SELECT * FROM reviews WHERE id = ?", review_id)
+        return dict(row) if row else None
+
+    def reviews_for(self, link_ids: list[str]) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        if link_ids:
+            marks = ",".join("?" * len(link_ids))
+            for r in self._all(f"SELECT * FROM reviews WHERE link_id IN ({marks}) "
+                               f"ORDER BY requested_at", *link_ids):
+                out.setdefault(r["link_id"], []).append(dict(r))
+        return out
+
+    def claim_review(self) -> dict | None:
+        """The oldest queued review, marked running (safe with several workers)."""
+        with self.lock:
+            row = self.db.execute(
+                "UPDATE reviews SET status = 'running', started_at = ?, attempts = attempts + 1 "
+                "WHERE id = (SELECT id FROM reviews WHERE status = 'queued' "
+                "ORDER BY requested_at LIMIT 1) RETURNING *", (iso(now()),)).fetchone()
+        return dict(row) if row else None
+
+    def requeue_stale(self) -> int:
+        """Reviews left 'running' by a stopped worker go back in the queue (3 tries)."""
+        with self.lock:
+            cur = self.db.execute("UPDATE reviews SET status = CASE WHEN attempts >= 3 THEN "
+                                  "'failed' ELSE 'queued' END, error = CASE WHEN attempts >= 3 "
+                                  "THEN 'stopped part way three times' ELSE error END "
+                                  "WHERE status = 'running'")
+            return cur.rowcount
+
+    def finish_review(self, review_id: str, status: str, **fields) -> None:
+        allowed = {"pdf_key_enc", "pdf_size", "sharepoint_url", "summary", "error", "cost_usd"}
+        sets = ", ".join(f"{k} = ?" for k in fields if k in allowed)
+        args = [v for k, v in fields.items() if k in allowed]
+        self._run(f"UPDATE reviews SET status = ?, finished_at = ?{', ' + sets if sets else ''} "
+                  f"WHERE id = ?", status, iso(now()), *args, review_id)
+
+    def review_pdf_path(self, review_id: str) -> Path:
+        return self.dir / "reviews" / f"{review_id}.pdf.enc"
+
+    def idle_unreviewed(self, quiet_minutes: int) -> list[str]:
+        """Links with new files and no upload for a while (the client didn't press Finished)."""
+        cutoff = iso(now() - dt.timedelta(minutes=quiet_minutes))
+        return [r[0] for r in self._all(
+            "SELECT link_id FROM files WHERE deleted_at IS NULL AND review_id IS NULL "
+            "GROUP BY link_id HAVING MAX(uploaded_at) < ?", cutoff)]
 
     def recent_audit(self, limit: int = 100) -> list[dict]:
         return [dict(r) for r in self._all(

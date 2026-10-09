@@ -1,0 +1,12 @@
+# The vault's AI reviewer (Claude Agent SDK). Separate from the public vault image so the
+# internet-facing container stays small and holds no AI or SharePoint credentials.
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/home/vault \
+    DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+RUN useradd --system --uid 10001 --create-home --home-dir /home/vault vault
+WORKDIR /srv
+COPY requirements.txt requirements-reviewer.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-reviewer.txt
+COPY brightly_vault ./brightly_vault
+USER vault
+CMD ["python", "-m", "brightly_vault.reviewer"]

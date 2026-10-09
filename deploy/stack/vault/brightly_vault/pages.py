@@ -378,6 +378,18 @@ ADMIN_JS = r"""
       st.appendChild(el('div', 'until ' + when(l.expires_at), 'muted small'));
       if (l.finished_at) st.appendChild(el('div', 'client finished ' + when(l.finished_at),
         'ok small'));
+      (l.reviews || []).slice(-2).forEach(function(r){
+        var box = el('div', null, 'small');
+        var label = {queued:'Review queued', running:'Reviewing…', done:'Reviewed',
+          failed:'Review failed'}[r.status] || r.status;
+        box.appendChild(el('span', label + (r.summary ? ': ' + r.summary : '')
+          + (r.error ? ': ' + r.error : ''), r.status === 'failed' ? 'err' : 'muted'));
+        if (r.has_pdf) { var a = el('a', ' PDF'); a.href = '/vault/reviews/' + r.id;
+          box.appendChild(a); }
+        if (r.sharepoint_url) { var sp = el('a', ' SharePoint'); sp.href = r.sharepoint_url;
+          sp.target = '_blank'; sp.rel = 'noopener'; box.appendChild(sp); }
+        st.appendChild(box);
+      });
       tr.appendChild(st);
       var cr = el('td'); cr.appendChild(el('div', when(l.created_at)));
       cr.appendChild(el('div', l.created_by, 'muted small')); tr.appendChild(cr);
@@ -386,6 +398,12 @@ ADMIN_JS = r"""
       show.addEventListener('click', function(){ api('links/' + l.id + '/reveal').then(function(r){
         if (r.ok) showSecret(l.client_name, r.url, r.code, false); }); });
       row.appendChild(show);
+      if (l.files.length) {
+        var rv = el('button', 'Review now', 'ghost'); rv.type = 'button';
+        rv.addEventListener('click', function(){ api('links/' + l.id + '/review', {})
+          .then(function(r){ if (!r.ok) alert(r.error); load(); }); });
+        row.appendChild(rv);
+      }
       if (l.state === 'open') {
         var close = el('button', 'Close', 'ghost'); close.type = 'button';
         close.addEventListener('click', function(){ api('links/' + l.id + '/close', {})

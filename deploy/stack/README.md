@@ -62,6 +62,51 @@ download, delete, close or reopen links. Every step is in the Activity list (app
 - ClamAV needs about 1.5 GB of RAM and a few minutes after first start to download its
   signatures. Uploads are refused until it is ready.
 
+### AI review of uploads (reviewer container)
+
+When a client presses "I'm finished" (or 30 minutes after their last upload, or when staff press
+"Review now"), the reviewer reads the new files and writes **"Suggested client data updates"** as
+a PDF into the client's SharePoint folder (`Clients/Active|Inactive/<Name> (<Xplan ID>)`, found by
+the Xplan ID entered on the link; otherwise `Clients/_Vault reviews`). The same PDF is on the
+vault page. It lists suggested field changes (current value, suggested value, source file and
+page, confidence), things needing attention, and a summary of each document. **Nothing in the
+client's record changes automatically.**
+
+How it is kept safe:
+- Each review is a Claude Agent SDK session that can only `Read`/`Glob` its own job folder (a
+  memory-only copy of the decrypted files, wiped afterwards): no shell, no writing, no web.
+- Text inside documents is treated as data. Instructions found in a document are flagged, not
+  followed.
+- Output is structured JSON, then filtered in code: TFNs removed (ATO check digit), long account,
+  member and ID numbers cut to the last 4 digits. Health details are kept out of the record sent
+  to Claude and are never written; the PDF only flags "health information present".
+- Each review has a spending cap (`REVIEW_MAX_USD`, default US$3).
+
+Setup:
+1. **Claude.** Either `ANTHROPIC_API_KEY` (Anthropic API: documents are processed offshore,
+   mainly in the US, so the privacy policy and client consent must cover that) **or**
+   `CLAUDE_CODE_USE_BEDROCK=1` with `AWS_REGION=ap-southeast-2` and keys of an IAM user limited
+   to `bedrock:InvokeModel*` (processed in Australia). For Bedrock, set `REVIEW_MODEL` to the
+   Bedrock model ID shown in the AWS console.
+2. **SharePoint.** In Entra, register an app "Brightly vault reviewer" and give it the Microsoft
+   Graph *application* permission **Sites.Selected**, with admin consent. Then grant it write
+   access to the one site that holds XPlan Files:
+   ```
+   POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
+   {"roles":["write"],"grantedToIdentities":[{"application":{"id":"<app client id>",
+     "displayName":"Brightly vault reviewer"}}]}
+   ```
+   (Graph Explorer, signed in as a SharePoint admin). Put the tenant ID, client ID and secret in
+   `GRAPH_*`, and set `SHAREPOINT_SITE` (e.g. `prosperum.sharepoint.com:/sites/ProsperumTeamFiles`).
+3. **Client record (optional).** A read-only database login, `REVIEW_DB_URL`:
+   ```sql
+   CREATE ROLE reviewer LOGIN PASSWORD '...';
+   GRANT CONNECT ON DATABASE brightly TO reviewer;
+   GRANT USAGE ON SCHEMA public TO reviewer;
+   GRANT SELECT ON family_group, person, contact_point, account, asset_liability, goal TO reviewer;
+   ```
+   Without it the PDF still lists what the documents say, just without "currently on file".
+
 ## Loading the Xplan data
 
 From a machine that can reach the database (on the server: `docker compose exec`, or a

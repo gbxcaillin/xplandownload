@@ -267,6 +267,7 @@ def build_public(s: Settings, store: Store,
             return error("This link is no longer open.", 410)
         store.mark(link["id"], "finished_at")
         store.audit("client", "client finished", link["id"], ip=client_ip(request))
+        store.enqueue_review(link["id"], "client finished")
         await maybe_notify(store.link(link["id"]), finished=True)
         return JSONResponse({"ok": True})
 
@@ -305,8 +306,16 @@ def build_admin(s: Settings, store: Store) -> Starlette:
             return await handler(request)
         return wrapped
 
+    def review_json(r: dict) -> dict:
+        return {"id": r["id"], "status": r["status"], "requested_by": r["requested_by"],
+                "requested_at": r["requested_at"], "finished_at": r["finished_at"],
+                "summary": r["summary"], "error": r["error"],
+                "sharepoint_url": r["sharepoint_url"], "has_pdf": bool(r["pdf_key_enc"]),
+                "files": len(json.loads(r["file_ids"]))}
+
     def link_json(l: dict) -> dict:
         return {
+            "reviews": [review_json(r) for r in l.get("reviews", [])],
             "id": l["id"], "client_name": l["client_name"], "client_ref": l["client_ref"],
             "client_email": l["client_email"], "created_by": l["created_by"],
             "created_at": l["created_at"], "expires_at": l["expires_at"],
@@ -328,7 +337,11 @@ def build_admin(s: Settings, store: Store) -> Starlette:
     @guard
     async def links(request: Request) -> Response:
         if request.method == "GET":
-            return JSONResponse({"links": [link_json(l) for l in store.list_links()]})
+            all_links = store.list_links()
+            reviews = store.reviews_for([l["id"] for l in all_links])
+            for l in all_links:
+                l["reviews"] = reviews.get(l["id"], [])
+            return JSONResponse({"links": [link_json(l) for l in all_links]})
         try:
             body = await request.json()
         except (ValueError, json.JSONDecodeError):
@@ -422,6 +435,31 @@ def build_admin(s: Settings, store: Store) -> Starlette:
         return JSONResponse({"ok": True})
 
     @guard
+    async def review_now(request: Request) -> Response:
+        link = store.link(request.path_params["id"])
+        if not link:
+            return error("Not found", 404)
+        review = store.enqueue_review(link["id"], request.state.who)
+        if not review:
+            return error("Nothing new to review (or a review is already waiting).", 409)
+        return JSONResponse({"ok": True})
+
+    @guard
+    async def review_pdf(request: Request) -> Response:
+        r = store.review(request.path_params["id"])
+        path = store.review_pdf_path(r["id"]) if r else None
+        if not r or not r["pdf_key_enc"] or not path.exists():
+            return PlainTextResponse("Not found", 404)
+        key = crypto.unseal(store.key, r["pdf_key_enc"], b"review:" + r["id"].encode())
+        link = store.link(r["link_id"])
+        store.audit(request.state.who, "review downloaded", r["link_id"], detail=r["id"])
+        name = re.sub(r"[^A-Za-z0-9 ._-]", "_", f"Vault review - {link['client_name']}.pdf")
+        return StreamingResponse(crypto.decrypt_chunks(path, key), media_type="application/pdf",
+                                 headers={"Content-Disposition": f"attachment; filename=\"{name}\"",
+                                          "Content-Length": str(r["pdf_size"]),
+                                          "Cache-Control": "no-store"})
+
+    @guard
     async def audit(request: Request) -> Response:
         return JSONResponse({"events": store.recent_audit(100)})
 
@@ -434,5 +472,7 @@ def build_admin(s: Settings, store: Store) -> Starlette:
         Route("/vault/api/links/{id}/extend", extend, methods=["POST"]),
         Route("/vault/files/{id}", download),
         Route("/vault/api/files/{id}/delete", delete, methods=["POST"]),
+        Route("/vault/api/links/{id}/review", review_now, methods=["POST"]),
+        Route("/vault/reviews/{id}", review_pdf),
         Route("/vault/api/audit", audit),
     ])

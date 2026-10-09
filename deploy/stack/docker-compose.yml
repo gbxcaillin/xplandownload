@@ -114,6 +114,50 @@ services:
       timeout: 5s
       retries: 3
 
+  reviewer:
+    # AI review of new vault uploads: suggested updates to the client's record as a PDF in the
+    # client's SharePoint folder. Waits quietly until Claude credentials are set.
+    build:
+      context: ./vault
+      dockerfile: Dockerfile.reviewer
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+      VAULT_KEY: ${VAULT_KEY}
+      VAULT_BRAND: ${VAULT_BRAND:-Brightday}
+      VAULT_NOTIFY_TO: ${VAULT_NOTIFY_TO:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      # Claude: EITHER the Anthropic API ...
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # ... OR Amazon Bedrock in Sydney (documents processed in Australia)
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-2}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      REVIEW_MODEL: ${REVIEW_MODEL:-claude-opus-5-5}
+      REVIEW_MAX_USD: ${REVIEW_MAX_USD:-3}
+      REVIEW_QUIET_MINUTES: ${REVIEW_QUIET_MINUTES:-30}
+      REVIEW_WORK_DIR: /work
+      # read-only view of the client's record, to compare documents against
+      BRIGHTLY_DB_URL: ${REVIEW_DB_URL:-}
+      # SharePoint (Graph, Sites.Selected on the XPlan Files site only)
+      GRAPH_TENANT_ID: ${GRAPH_TENANT_ID:-}
+      GRAPH_CLIENT_ID: ${GRAPH_CLIENT_ID:-}
+      GRAPH_CLIENT_SECRET: ${GRAPH_CLIENT_SECRET:-}
+      SHAREPOINT_SITE: ${SHAREPOINT_SITE:-}
+      SHAREPOINT_CLIENTS_PATH: ${SHAREPOINT_CLIENTS_PATH:-General/XPlan Files/Clients}
+      TZ: Australia/Melbourne
+    volumes:
+      - ${VAULT_DATA_DIR:-/srv/brightly/vault}:/data
+    tmpfs:
+      - /work:size=2g,mode=0700,uid=10001   # decrypted copies live only in memory, per job
+    networks: [internal, egress]            # egress: Claude and Microsoft Graph
+    depends_on: [vault]
+
   clamav:
     # Virus scanner for vault uploads. Updates its signatures itself (freshclam). Uses ~1.5 GB RAM.
     image: clamav/clamav:1.4.2
