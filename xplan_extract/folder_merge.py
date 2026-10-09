@@ -230,11 +230,21 @@ def _item_key(row: dict) -> tuple:
 
 
 def is_empty(path: Path) -> bool:
-    """No files anywhere inside (empty subfolders don't count)."""
+    """No files anywhere inside (empty subfolders don't count). Stops at the first file, and
+    reads only the folder listing, so OneDrive online-only files aren't touched."""
     try:
-        return not any(p.is_file() for p in path.rglob("*"))
+        with os.scandir(_long(path)) as entries:
+            subdirs = []
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    subdirs.append(Path(entry.path))
+                else:
+                    return False
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
+    return all(is_empty(d) for d in subdirs)
 
 
 def remove_empty(path: Path, tries: int = 6, wait: float = 2.0) -> str:
@@ -256,9 +266,12 @@ def remove_empty(path: Path, tries: int = 6, wait: float = 2.0) -> str:
     return error
 
 
-def empty_client_folders(dest: Path) -> list[Path]:
-    """Client folders with no files left in them (e.g. after a merge)."""
-    return [path for _where, path in _folders(dest / "Clients") if is_empty(path)]
+def empty_client_folders(dest: Path, candidates: Iterable[Path] | None = None) -> list[Path]:
+    """Client folders with no files left in them (e.g. after a merge). With ``candidates``,
+    only those are checked (much quicker than every client folder)."""
+    paths = candidates if candidates is not None else (
+        path for _where, path in _folders(dest / "Clients"))
+    return [p for p in paths if p.is_dir() and is_empty(p)]
 
 
 def load_folders(dest: Path) -> list[Folder]:
@@ -266,7 +279,7 @@ def load_folders(dest: Path) -> list[Folder]:
     out = []
     for where, path in _folders(dest / "Clients"):
         key = (where, path.name.lower())
-        if is_empty(path):
+        if not files.get(key) and is_empty(path):
             continue  # left over from a merge: nothing to compare
         fid = set(ids.get(key, ()))
         if not fid:
@@ -384,6 +397,10 @@ def find_duplicates(dest: Path, data, progress: Progress = print) -> tuple[list[
     proposals = propose(groups, people)
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = dest / f"{REVIEW_PREFIX}{stamp}.xlsx"
+    n = 2
+    while path.exists():
+        path = dest / f"{REVIEW_PREFIX}{stamp}_{n}.xlsx"
+        n += 1
     write_review(proposals, path)
     return proposals, path
 
@@ -393,7 +410,7 @@ def find_duplicates(dest: Path, data, progress: Progress = print) -> tuple[list[
 # --------------------------------------------------------------------------
 
 def latest_review(dest: Path) -> Path | None:
-    found = sorted(dest.glob(f"{REVIEW_PREFIX}*.xlsx"))
+    found = sorted(dest.glob(f"{REVIEW_PREFIX}*.xlsx"), key=lambda p: p.stat().st_mtime)
     return found[-1] if found else None
 
 
@@ -489,91 +506,48 @@ def apply_merges(dest: Path, review: Path, progress: Progress = print,
         return _item_key({h: r[i] if i < len(r) else "" for h, i in col.items()})
 
     result = MergeResult()
-    for path in empty_client_folders(dest):
+    decisions = read_decisions(review)
+    # folders emptied by an earlier merge whose removal OneDrive blocked
+    sources = {clients / _where(d["Merge in in"]) / d["Merge in folder"] for d in decisions}
+    progress(f"Checking {len(sources):,} folder(s) from the review for leftovers ...")
+    for path in empty_client_folders(dest, sorted(sources)):
         if remove_empty(path, tries=3) == "":
             result.empty_removed += 1
         else:
             result.leftover.append(path)
+    if result.empty_removed:
+        progress(f"  removed {result.empty_removed:,} empty folder(s) left by an earlier merge")
+    todo = [d for d in decisions
+            if levels is None or d.get("Confidence", "").strip().lower() in levels]
+    result.skipped = len(decisions) - len(todo)
+    progress(f"Rows to work through: {len(todo):,}")
     log: list[list[str]] = []
-    for d in read_decisions(review):
-        decision = d.get(DECISION, "").lower()
-        if levels is not None and d.get("Confidence", "").strip().lower() not in levels:
-            result.skipped += 1
-            continue
-        if not decision.startswith("merge"):
-            result.kept += 1
-            continue
-        main_dir = clients / _where(d["Main in"]) / d["Main folder"]
-        src_dir = clients / _where(d["Merge in in"]) / d["Merge in folder"]
-        if not src_dir.is_dir():
-            result.already += 1   # merged earlier (or moved by hand)
-            continue
-        if not main_dir.is_dir():
-            result.problems.append(f"{d['Main folder']}: main folder not found")
-            continue
-        hint = (d.get("Merge in Xplan IDs") or "").split(",")[0].strip() or "merged"
-        main_items: dict[tuple, Path] = {}
-        for p in main_dir.rglob("*"):
-            if p.is_file() and item_of(p) is not None:
-                main_items.setdefault(item_of(p), p)
-        moved = dupes = renamed = 0
-        for src in sorted(p for p in src_dir.rglob("*") if p.is_file()):
-            target_dir = main_dir / src.parent.relative_to(src_dir)
-            item = item_of(src)
-            try:
-                twin = main_items.get(item) if item is not None else None
-                if twin is not None and twin.exists():
-                    # the very same Xplan document is already in the main folder
-                    os.remove(_long(src))
-                    result.index_rows_updated += set_path(src, twin)
-                    dupes += 1
-                    continue
-                target_dir.mkdir(parents=True, exist_ok=True)
-                name = src.name
-                if (target_dir / name).exists():
-                    name = _unique(target_dir, name, hint)
-                    renamed += 1
-                os.replace(_long(src), _long(target_dir / name))
-                result.index_rows_updated += set_path(src, target_dir / name)
-                if item is not None:
-                    main_items.setdefault(item, target_dir / name)
-                moved += 1
-            except OSError as exc:
-                result.problems.append(f"{d['Merge in folder']}: {src.name}: "
-                                       f"{type(exc).__name__} {exc.strerror or exc}")
-        if is_empty(src_dir):
-            result.merged += 1
-            status = "merged"
-            error = remove_empty(src_dir)
-            if error:
-                status = "merged (empty folder not removed yet)"
-                result.leftover.append(src_dir)
-            if result.merged % 50 == 0:
-                progress(f"  merged {result.merged:,} folders")
-        else:
-            status = "partly merged (files left behind: see problems)"
-            result.problems.append(f"{d['Merge in folder']}: files could not be moved")
-        result.files_moved += moved
-        result.duplicates_removed += dupes
-        result.renamed += renamed
-        log.append([d["Main folder"], d["Main in"], d["Merge in folder"], d["Merge in in"],
-                    d.get("Main Xplan IDs", ""), d.get("Merge in Xplan IDs", ""), status,
-                    str(moved), str(dupes), str(renamed)])
+    try:
+        for n, d in enumerate(todo, 1):
+            _merge_row(d, clients, result, log, item_of, set_path)
+            if n % 10 == 0 or n == len(todo):
+                progress(f"  {n:,} of {len(todo):,} rows done "
+                         f"({result.merged:,} merged, {result.files_moved:,} files moved)")
+        if result.leftover:
+            time.sleep(5)
+            result.leftover = [p for p in result.leftover if p.exists() and remove_empty(p)]
+    finally:
+        # also when stopped part way (Ctrl+C): the index must match the files already moved
+        if result.index_rows_updated:
+            stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            os.replace(_long(index_path), _long(
+                index_path.with_name(f"{index_path.stem}.before-merge-{stamp}.csv")))
+            tmp = index_path.with_suffix(".tmp")
+            with open(_long(tmp), "w", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                w.writerow(head)
+                w.writerows(rows)
+            os.replace(_long(tmp), _long(index_path))
+        _write_log(dest, result, log)
+    return result
 
-    if result.leftover:
-        time.sleep(5)
-        result.leftover = [p for p in result.leftover if p.exists() and remove_empty(p)]
 
-    if result.index_rows_updated:
-        stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        os.replace(_long(index_path),
-                   _long(index_path.with_name(f"{index_path.stem}.before-merge-{stamp}.csv")))
-        tmp = index_path.with_suffix(".tmp")
-        with open(_long(tmp), "w", newline="", encoding="utf-8-sig") as fh:
-            w = csv.writer(fh)
-            w.writerow(head)
-            w.writerows(rows)
-        os.replace(_long(tmp), _long(index_path))
+def _write_log(dest: Path, result: MergeResult, log: list[list[str]]) -> None:
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     result.log_file = dest / f"folder_merge_done_{stamp}.csv"
     with open(_long(result.log_file), "w", newline="", encoding="utf-8-sig") as fh:
@@ -582,4 +556,65 @@ def apply_merges(dest: Path, review: Path, progress: Progress = print,
                     "merged_xplan_ids", "result", "files_moved", "duplicates_removed",
                     "renamed"])
         w.writerows(log)
-    return result
+
+
+def _merge_row(d: dict, clients: Path, result: MergeResult, log: list[list[str]],
+               item_of, set_path) -> None:
+    """Merge one review row's folder into its main folder."""
+    if not d.get(DECISION, "").lower().startswith("merge"):
+        result.kept += 1
+        return
+    main_dir = clients / _where(d["Main in"]) / d["Main folder"]
+    src_dir = clients / _where(d["Merge in in"]) / d["Merge in folder"]
+    if not src_dir.is_dir():
+        result.already += 1   # merged earlier (or moved by hand)
+        return
+    if not main_dir.is_dir():
+        result.problems.append(f"{d['Main folder']}: main folder not found")
+        return
+    hint = (d.get("Merge in Xplan IDs") or "").split(",")[0].strip() or "merged"
+    main_items: dict[tuple, Path] = {}
+    for p in main_dir.rglob("*"):
+        item = item_of(p)
+        if item is not None:
+            main_items.setdefault(item, p)
+    moved = dupes = renamed = 0
+    for src in sorted(p for p in src_dir.rglob("*") if p.is_file()):
+        target_dir = main_dir / src.parent.relative_to(src_dir)
+        item = item_of(src)
+        try:
+            twin = main_items.get(item) if item is not None else None
+            if twin is not None and twin.exists():
+                # the very same Xplan document is already in the main folder
+                os.remove(_long(src))
+                result.index_rows_updated += set_path(src, twin)
+                dupes += 1
+                continue
+            target_dir.mkdir(parents=True, exist_ok=True)
+            name = src.name
+            if (target_dir / name).exists():
+                name = _unique(target_dir, name, hint)
+                renamed += 1
+            os.replace(_long(src), _long(target_dir / name))
+            result.index_rows_updated += set_path(src, target_dir / name)
+            if item is not None:
+                main_items.setdefault(item, target_dir / name)
+            moved += 1
+        except OSError as exc:
+            result.problems.append(f"{d['Merge in folder']}: {src.name}: "
+                                   f"{type(exc).__name__} {exc.strerror or exc}")
+    result.files_moved += moved
+    result.duplicates_removed += dupes
+    result.renamed += renamed
+    if is_empty(src_dir):
+        result.merged += 1
+        status = "merged"
+        if remove_empty(src_dir):
+            status = "merged (empty folder not removed yet)"
+            result.leftover.append(src_dir)
+    else:
+        status = "partly merged (files left behind: see problems)"
+        result.problems.append(f"{d['Merge in folder']}: some files could not be moved")
+    log.append([d["Main folder"], d["Main in"], d["Merge in folder"], d["Merge in in"],
+                d.get("Main Xplan IDs", ""), d.get("Merge in Xplan IDs", ""), status,
+                str(moved), str(dupes), str(renamed)])

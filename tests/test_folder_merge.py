@@ -132,12 +132,17 @@ def test_empty_leftovers_are_skipped_and_removed(tmp_path, monkeypatch):
     from xplan_extract import folder_merge
     _setup(tmp_path)
     # a merge whose folder removal failed (OneDrive holding it) leaves an empty folder
+    _, old_review = find_duplicates(tmp_path, None, lambda m: None)
     src = tmp_path / "Clients" / "Inactive" / "Alexander Mc Donough (40975)"
     for f in src.iterdir():
         f.unlink()
-    proposals, review = find_duplicates(tmp_path, None, lambda m: None)
+    index = tmp_path / "documents_index.csv"
+    text = index.read_text(encoding="utf-8-sig").replace(
+        "Inactive\\Alexander Mc Donough (40975)", "Active\\Alexander Mcdonough (41479)")
+    index.write_text(text, encoding="utf-8-sig")
+    proposals, _ = find_duplicates(tmp_path, None, lambda m: None)
     assert all("40975" not in p.other.name and "40975" not in p.main.name for p in proposals)
-    r = apply_merges(tmp_path, review, lambda m: None, only=["nothing"])
+    r = apply_merges(tmp_path, old_review, lambda m: None, only=["nothing"])
     assert r.empty_removed == 1 and not src.exists()
 
 
@@ -157,3 +162,27 @@ def test_remove_empty_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(folder_merge.os, "rmdir", flaky)
     monkeypatch.setattr(folder_merge.time, "sleep", lambda s: None)
     assert folder_merge.remove_empty(d) == "" and not d.exists()
+
+
+def test_index_saved_when_stopped(tmp_path, monkeypatch):
+    from xplan_extract import folder_merge
+    _setup(tmp_path)
+    _, review = find_duplicates(tmp_path, None, lambda m: None)
+    real = folder_merge._merge_row
+    calls = {"n": 0}
+
+    def stop_after_first(*args):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise KeyboardInterrupt
+        real(*args)
+
+    monkeypatch.setattr(folder_merge, "_merge_row", stop_after_first)
+    try:
+        apply_merges(tmp_path, review, lambda m: None)
+    except KeyboardInterrupt:
+        pass
+    with open(tmp_path / "documents_index.csv", encoding="utf-8-sig") as fh:
+        rows = [r for r in csv.DictReader(fh) if r["client_id"] == "40975"]
+    assert all("41479" in r["saved_as"] for r in rows)   # moved files are in the index
+    assert list(tmp_path.glob("folder_merge_done_*.csv"))
