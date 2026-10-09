@@ -4,7 +4,9 @@
 internet ──443──> Caddy (HTTPS, automatic certificates)
                     └─> oauth2-proxy (Microsoft Entra sign-in, MFA via Conditional Access)
                           └─> Brightly app ──> PostgreSQL        (internal network, no ports)
-backup container ──nightly──> pg_dump → checked → age-encrypted → Azure "backups"
+vault (client uploads) ── /v/<token> public ── ClamAV scan + AES-256 encryption as files stream in
+                        └ /vault/ staff pages, only after sign-in
+backup container ──nightly──> pg_dump + vault → checked → age-encrypted → Azure "backups"
 ```
 
 Only ports 80/443 (Caddy) are published. The database and app have no route to or from the
@@ -38,6 +40,27 @@ internet; only the backup container can reach Azure.
    ```
 6. Open `https://<DOMAIN>`: you are sent to Microsoft sign-in and then see the app (the
    placeholder echoes your request until `BRIGHTLY_IMAGE` is set).
+
+## Client vault (secure upload links)
+
+Staff open `https://<DOMAIN>/vault/` (Microsoft sign-in), enter the client's name (and Xplan ID
+/ family group), and get a link plus a 6-digit code. Send the link by email and the code by SMS
+or phone: never both in the same message. The client opens the link, enters the code and drags
+files in. Each file is checked by ClamAV and encrypted (AES-256-GCM, its own key, wrapped by
+`VAULT_KEY`) while it streams in, so it is never on disk unencrypted. Staff see what arrived,
+download, delete, close or reopen links. Every step is in the Activity list (append-only).
+
+- Links expire (default 14 days). Five wrong codes lock a link; staff can reopen it.
+- PDFs, photos and Office documents only, up to 100 MB each, 50 per link. Viruses are refused.
+- **`VAULT_KEY` must be in the password manager.** Without it the vault's files (and their
+  backups) can't be read. Create it with `openssl rand -base64 32`.
+- Optional email (`SMTP_*`): the link can be emailed to the client, and staff get a notice
+  when files arrive. Without it, staff copy the link themselves.
+- Test the virus check after deploying: upload a file containing the standard EICAR test
+  string (eicar.org). It must be refused.
+- Server folders: `sudo mkdir -p /srv/brightly/vault && sudo chown 10001 /srv/brightly/vault`.
+- ClamAV needs about 1.5 GB of RAM and a few minutes after first start to download its
+  signatures. Uploads are refused until it is ready.
 
 ## Loading the Xplan data
 

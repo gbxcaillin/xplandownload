@@ -24,7 +24,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks: [edge]
-    depends_on: [auth]
+    depends_on: [auth, vault]
 
   auth:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
@@ -43,14 +43,15 @@ services:
       OAUTH2_PROXY_SCOPE: openid email profile
       OAUTH2_PROXY_REDIRECT_URL: https://${DOMAIN}/oauth2/callback
       OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
-      OAUTH2_PROXY_UPSTREAMS: http://app:${APP_PORT:-3000}
+      # the app, plus the vault's staff pages at /vault/ (both only after sign-in)
+      OAUTH2_PROXY_UPSTREAMS: http://app:${APP_PORT:-3000}/,http://vault:8081/vault/
       OAUTH2_PROXY_REVERSE_PROXY: "true"
       OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
       OAUTH2_PROXY_PASS_USER_HEADERS: "true"      # app reads X-Forwarded-Email / -User
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true"  # Entra work accounts send no email_verified claim
     networks: [edge, internal]
-    depends_on: [app]
+    depends_on: [app, vault]
 
   app:
     # Until the Brightly image exists this placeholder echoes the request, so sign-in can be
@@ -82,6 +83,46 @@ services:
       retries: 10
     shm_size: 256mb
 
+  vault:
+    # Client upload links (/v/<token>, public, via Caddy) and the staff pages (/vault/, only
+    # via oauth2-proxy). Files are virus-scanned and encrypted as they arrive.
+    build: ./vault
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+      VAULT_KEY: ${VAULT_KEY:?set VAULT_KEY (openssl rand -base64 32), keep a copy offline}
+      VAULT_BRAND: ${VAULT_BRAND:-Brightday}
+      VAULT_MAX_MB: ${VAULT_MAX_MB:-100}
+      VAULT_LINK_DAYS: ${VAULT_LINK_DAYS:-14}
+      VAULT_ADMIN_EMAILS: ${VAULT_ADMIN_EMAILS:-}
+      VAULT_NOTIFY_TO: ${VAULT_NOTIFY_TO:-}
+      CLAMD_HOST: clamav
+      VAULT_REQUIRE_SCAN: "true"
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      TZ: Australia/Melbourne
+    volumes:
+      - ${VAULT_DATA_DIR:-/srv/brightly/vault}:/data
+    networks: [edge, internal, egress]   # egress only for the optional emails
+    depends_on: [clamav]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  clamav:
+    # Virus scanner for vault uploads. Updates its signatures itself (freshclam). Uses ~1.5 GB RAM.
+    image: clamav/clamav:1.4.2
+    restart: unless-stopped
+    volumes:
+      - ./clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+      - clamav_db:/var/lib/clamav
+    networks: [internal, egress]         # egress for signature updates
+
   backup:
     build: ./backup
     restart: unless-stopped
@@ -96,6 +137,7 @@ services:
       TZ: Australia/Melbourne
     volumes:
       - ${BACKUP_SPOOL_DIR:-/srv/brightly/backup-spool}:/spool
+      - ${VAULT_DATA_DIR:-/srv/brightly/vault}:/vault:ro
     networks: [internal, egress]
     depends_on:
       db: { condition: service_healthy }
@@ -103,6 +145,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  clamav_db:
 
 networks:
   edge: {}

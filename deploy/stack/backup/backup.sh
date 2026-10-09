@@ -7,6 +7,17 @@
 #   backup.sh now    one backup immediately
 set -euo pipefail
 
+backup_vault() {
+  # Vault files are already encrypted (VAULT_KEY); the archive is encrypted again to the backup
+  # key. snapshot/vault.db is the vault's own consistent copy of its database (made hourly).
+  [ -d /vault/files ] || return 0
+  local stamp="$1" file="/spool/vault-$1.tar.age"
+  tar -C /vault -cf - files snapshot | age -r "$BACKUP_AGE_RECIPIENT" -o "$file"
+  sha256sum "$file" | awk '{print $1}' > "${file}.sha256"
+  rclone copy "/spool" ":azureblob,sas_url='${AZURE_BACKUP_SAS_URL}':backups/vault/$(date +%Y/%m)" \
+    --include "vault-${stamp}.*" --azureblob-no-check-container --retries 5
+}
+
 run_backup() {
   local stamp file
   stamp=$(date +%Y%m%d-%H%M)
@@ -20,7 +31,9 @@ run_backup() {
   echo "[$(date -Is)] uploading $(du -h "${file}.age" | cut -f1)"
   rclone copy "/spool" ":azureblob,sas_url='${AZURE_BACKUP_SAS_URL}':backups/db/$(date +%Y/%m)" \
     --include "brightly-${stamp}.*" --azureblob-no-check-container --retries 5
-  find /spool -name 'brightly-*' -mtime +3 -delete   # keep 3 days locally for a quick restore
+  backup_vault "$stamp"
+  find /spool -name 'brightly-*' -mtime +3 -delete
+  find /spool -name 'vault-*' -mtime +3 -delete   # keep 3 days locally for a quick restore
   date -Is > /spool/LAST_SUCCESS                      # monitoring alerts if this gets old
   echo "[$(date -Is)] backup ok: brightly-${stamp}.dump.age"
 }

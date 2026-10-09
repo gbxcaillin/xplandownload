@@ -11,7 +11,23 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
 	}
-	reverse_proxy auth:4180
+	# Client upload links: public (the link token plus a 6-digit code protect them). Any
+	# sign-in headers a visitor sends are dropped; the vault never trusts them on this port.
+	handle /v/* {
+		request_body {
+			max_size 110MB
+		}
+		reverse_proxy vault:8080 {
+			header_up -X-Forwarded-Email
+			header_up -X-Forwarded-User
+			header_up -X-Forwarded-Preferred-Username
+			header_up -X-Forwarded-Groups
+		}
+	}
+	# Everything else, including the vault's staff pages at /vault/, needs Microsoft sign-in.
+	handle {
+		reverse_proxy auth:4180
+	}
 	log {
 		output file /data/access.log {
 			roll_size 20MiB
