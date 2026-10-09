@@ -455,8 +455,9 @@ def cmd_merge_folders(a) -> None:
         if r.empty_removed:
             log(f"  {r.empty_removed:,} empty folder(s) left by an earlier merge removed")
         if r.leftover:
-            log(f"  {len(r.leftover):,} empty folder(s) OneDrive is still holding: they're "
-                "removed on the next --apply")
+            log(f"  {len(r.leftover):,} empty folder(s) Windows wouldn't delete, e.g. "
+                f"{r.leftover[0].name}: {folder_merge.remove_empty(r.leftover[0], tries=1)} "
+                "- they're tried again on the next --apply")
         if r.skipped:
             log(f"  {r.skipped:,} other row(s) left for later: run merge-folders again for a "
                 "fresh list of what's left")

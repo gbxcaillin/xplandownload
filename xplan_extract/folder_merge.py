@@ -247,14 +247,25 @@ def is_empty(path: Path) -> bool:
     return all(is_empty(d) for d in subdirs)
 
 
-def remove_empty(path: Path, tries: int = 6, wait: float = 2.0) -> str:
+def _clear_attributes(path: Path) -> None:
+    """OneDrive marks some folders read-only/system, and Windows then refuses to delete
+    them ("Access is denied"), like `attrib -r -s`."""
+    if os.name != "nt":
+        return
+    import ctypes
+    ctypes.windll.kernel32.SetFileAttributesW(_long(path), 0x80)   # FILE_ATTRIBUTE_NORMAL
+
+
+def remove_empty(path: Path, tries: int = 3, wait: float = 1.0) -> str:
     """Remove an empty folder (and its empty subfolders). OneDrive can hold a folder for a few
     seconds after its files leave, so this retries. Returns "" or the error."""
     error = ""
     for attempt in range(tries):
         try:
             for sub in sorted((p for p in path.rglob("*") if p.is_dir()), reverse=True):
+                _clear_attributes(sub)
                 os.rmdir(_long(sub))
+            _clear_attributes(path)
             os.rmdir(_long(path))
             return ""
         except FileNotFoundError:
@@ -529,7 +540,7 @@ def apply_merges(dest: Path, review: Path, progress: Progress = print,
                 progress(f"  {n:,} of {len(todo):,} rows done "
                          f"({result.merged:,} merged, {result.files_moved:,} files moved)")
         if result.leftover:
-            time.sleep(5)
+            time.sleep(3)
             result.leftover = [p for p in result.leftover if p.exists() and remove_empty(p)]
     finally:
         # also when stopped part way (Ctrl+C): the index must match the files already moved
