@@ -106,7 +106,7 @@ def test_review_then_apply(tmp_path):
     assert r.log_file.exists()
     # applying again finds nothing left to merge
     again = apply_merges(tmp_path, review, lambda m: None)
-    assert again.merged == 0 and again.problems
+    assert again.merged == 0 and again.already == 1 and not again.problems
 
 
 def test_apply_only_high(tmp_path):
@@ -126,3 +126,34 @@ def test_apply_only_high(tmp_path):
     # the remade list only has what's left
     proposals, _ = find_duplicates(tmp_path, None, lambda m: None)
     assert [p.other.name for p in proposals] == ["Alister Pillar (4036)"]
+
+
+def test_empty_leftovers_are_skipped_and_removed(tmp_path, monkeypatch):
+    from xplan_extract import folder_merge
+    _setup(tmp_path)
+    # a merge whose folder removal failed (OneDrive holding it) leaves an empty folder
+    src = tmp_path / "Clients" / "Inactive" / "Alexander Mc Donough (40975)"
+    for f in src.iterdir():
+        f.unlink()
+    proposals, review = find_duplicates(tmp_path, None, lambda m: None)
+    assert all("40975" not in p.other.name and "40975" not in p.main.name for p in proposals)
+    r = apply_merges(tmp_path, review, lambda m: None, only=["nothing"])
+    assert r.empty_removed == 1 and not src.exists()
+
+
+def test_remove_empty_retries(tmp_path, monkeypatch):
+    from xplan_extract import folder_merge
+    d = tmp_path / "x"
+    (d / "sub").mkdir(parents=True)
+    calls = {"n": 0}
+    real = folder_merge.os.rmdir
+
+    def flaky(path):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError(13, "in use")
+        real(path)
+
+    monkeypatch.setattr(folder_merge.os, "rmdir", flaky)
+    monkeypatch.setattr(folder_merge.time, "sleep", lambda s: None)
+    assert folder_merge.remove_empty(d) == "" and not d.exists()

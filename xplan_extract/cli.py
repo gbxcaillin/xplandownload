@@ -450,6 +450,13 @@ def cmd_merge_folders(a) -> None:
             raise SystemExit(str(exc))
         log("")
         log(f"Merged {r.merged:,} folder(s); {r.kept:,} marked keep were left alone")
+        if r.already:
+            log(f"  {r.already:,} row(s) were already merged")
+        if r.empty_removed:
+            log(f"  {r.empty_removed:,} empty folder(s) left by an earlier merge removed")
+        if r.leftover:
+            log(f"  {len(r.leftover):,} empty folder(s) OneDrive is still holding: they're "
+                "removed on the next --apply")
         if r.skipped:
             log(f"  {r.skipped:,} other row(s) left for later: run merge-folders again for a "
                 "fresh list of what's left")
@@ -460,6 +467,8 @@ def cmd_merge_folders(a) -> None:
         if r.problems:
             log(f"  Problems: {len(r.problems):,}, e.g. {r.problems[0]} "
                 "(a file open or still syncing? re-run --apply to retry)")
+            for line in r.problems[1:4]:
+                log(f"    {line}")
         log(f"Log: {r.log_file}")
         return
 

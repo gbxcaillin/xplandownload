@@ -24,6 +24,7 @@ import csv
 import datetime as dt
 import os
 import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -228,11 +229,45 @@ def _item_key(row: dict) -> tuple:
     return (row.get("kind", ""), row.get("xplan_docid", ""), row.get("xplan_partid", ""))
 
 
+def is_empty(path: Path) -> bool:
+    """No files anywhere inside (empty subfolders don't count)."""
+    try:
+        return not any(p.is_file() for p in path.rglob("*"))
+    except OSError:
+        return False
+
+
+def remove_empty(path: Path, tries: int = 6, wait: float = 2.0) -> str:
+    """Remove an empty folder (and its empty subfolders). OneDrive can hold a folder for a few
+    seconds after its files leave, so this retries. Returns "" or the error."""
+    error = ""
+    for attempt in range(tries):
+        try:
+            for sub in sorted((p for p in path.rglob("*") if p.is_dir()), reverse=True):
+                os.rmdir(_long(sub))
+            os.rmdir(_long(path))
+            return ""
+        except FileNotFoundError:
+            return ""
+        except OSError as exc:
+            error = f"{type(exc).__name__}: {exc.strerror or exc}"
+            if attempt < tries - 1:
+                time.sleep(wait)
+    return error
+
+
+def empty_client_folders(dest: Path) -> list[Path]:
+    """Client folders with no files left in them (e.g. after a merge)."""
+    return [path for _where, path in _folders(dest / "Clients") if is_empty(path)]
+
+
 def load_folders(dest: Path) -> list[Folder]:
     ids, items, files = read_index(dest / INDEX)
     out = []
     for where, path in _folders(dest / "Clients"):
         key = (where, path.name.lower())
+        if is_empty(path):
+            continue  # left over from a merge: nothing to compare
         fid = set(ids.get(key, ()))
         if not fid:
             m = ID_SUFFIX.search(path.name)
@@ -386,6 +421,9 @@ class MergeResult:
     merged: int = 0
     kept: int = 0
     skipped: int = 0        # left for later (not in the chosen confidence levels)
+    already: int = 0        # rows whose folder was already merged
+    empty_removed: int = 0  # empty folders left by an earlier merge, removed now
+    leftover: list[Path] = field(default_factory=list)   # empty, but OneDrive held on to it
     files_moved: int = 0
     duplicates_removed: int = 0
     renamed: int = 0
@@ -451,6 +489,11 @@ def apply_merges(dest: Path, review: Path, progress: Progress = print,
         return _item_key({h: r[i] if i < len(r) else "" for h, i in col.items()})
 
     result = MergeResult()
+    for path in empty_client_folders(dest):
+        if remove_empty(path, tries=3) == "":
+            result.empty_removed += 1
+        else:
+            result.leftover.append(path)
     log: list[list[str]] = []
     for d in read_decisions(review):
         decision = d.get(DECISION, "").lower()
@@ -463,7 +506,7 @@ def apply_merges(dest: Path, review: Path, progress: Progress = print,
         main_dir = clients / _where(d["Main in"]) / d["Main folder"]
         src_dir = clients / _where(d["Merge in in"]) / d["Merge in folder"]
         if not src_dir.is_dir():
-            result.problems.append(f"{d['Merge in folder']}: folder not found (already merged?)")
+            result.already += 1   # merged earlier (or moved by hand)
             continue
         if not main_dir.is_dir():
             result.problems.append(f"{d['Main folder']}: main folder not found")
@@ -498,26 +541,28 @@ def apply_merges(dest: Path, review: Path, progress: Progress = print,
             except OSError as exc:
                 result.problems.append(f"{d['Merge in folder']}: {src.name}: "
                                        f"{type(exc).__name__} {exc.strerror or exc}")
-        for sub in sorted((p for p in src_dir.rglob("*") if p.is_dir()), reverse=True):
-            try:
-                sub.rmdir()
-            except OSError:
-                pass
-        try:
-            src_dir.rmdir()
+        if is_empty(src_dir):
             result.merged += 1
             status = "merged"
+            error = remove_empty(src_dir)
+            if error:
+                status = "merged (empty folder not removed yet)"
+                result.leftover.append(src_dir)
             if result.merged % 50 == 0:
                 progress(f"  merged {result.merged:,} folders")
-        except OSError:
+        else:
             status = "partly merged (files left behind: see problems)"
-            result.problems.append(f"{d['Merge in folder']}: not empty after the merge")
+            result.problems.append(f"{d['Merge in folder']}: files could not be moved")
         result.files_moved += moved
         result.duplicates_removed += dupes
         result.renamed += renamed
         log.append([d["Main folder"], d["Main in"], d["Merge in folder"], d["Merge in in"],
                     d.get("Main Xplan IDs", ""), d.get("Merge in Xplan IDs", ""), status,
                     str(moved), str(dupes), str(renamed)])
+
+    if result.leftover:
+        time.sleep(5)
+        result.leftover = [p for p in result.leftover if p.exists() and remove_empty(p)]
 
     if result.index_rows_updated:
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
