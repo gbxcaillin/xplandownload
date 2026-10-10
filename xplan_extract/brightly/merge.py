@@ -152,7 +152,8 @@ CHILD_TABLES = {
                      ("signed documents", db.signed_document, "family_group_id"),
                      ("tasks", db.task, "family_group_id"),
                      ("document links", db.document_link, "family_group_id"),
-                     ("entity roles", db.entity_role, "family_group_id")],
+                     ("entity roles", db.entity_role, "family_group_id"),
+                     ("ongoing fee arrangements", db.ofa_arrangement, "family_group_id")],
     "entity": [("roles", db.entity_role, "entity_id"), ("accounts", db.account, "entity_id"),
                ("signed documents", db.signed_document, "entity_id"),
                ("document links", db.document_link, "entity_id")],
@@ -232,7 +233,9 @@ def apply_merge(engine: sa.Engine, kind: str, keep: str, drop: str, *,
     t = _table(kind)
     now = dt.datetime.now(dt.timezone.utc)
     report: dict[str, Any] = {"kept": keep, "dropped": drop, "fields": {}, "moved": {}}
+    from . import audit
     with engine.begin() as conn:
+        audit.set_actor(conn, actor or "merge tool")
         rk, rd = _row(conn, kind, keep), _row(conn, kind, drop)
         vk, _ = _values(conn, kind, keep)
         vd, _ = _values(conn, kind, drop)

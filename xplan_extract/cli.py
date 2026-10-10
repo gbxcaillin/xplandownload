@@ -344,6 +344,38 @@ def cmd_ofa(a) -> None:
         raise SystemExit(str(exc))
 
 
+def cmd_records(a) -> None:
+    import sqlalchemy as sa
+    from .brightly import audit, records
+
+    if not a.db:
+        raise SystemExit("Pass --db URL (or set BRIGHTLY_DB_URL in .env).")
+    engine = sa.create_engine(a.db)
+    if a.rec_cmd == "lock":
+        sas = a.sas or env("ADVICE_RECORDS_SAS_URL")
+        if not sas:
+            raise SystemExit("Set ADVICE_RECORDS_SAS_URL (SAS for the advice-records container).")
+        try:
+            row = records.lock(engine, sas, Path(a.file), family_group_id=a.client, kind=a.kind,
+                               record_date=_date(a.date) if a.date else dt.date.today(),
+                               actor=a.actor or getpass.getuser(), title=a.title or "")
+        except (records.RecordError, OSError) as exc:
+            raise SystemExit(str(exc))
+        log(f"Locked until {row['locked_until']:%d %b %Y}: {row['blob_path']}")
+        log(f"  fingerprint (SHA-256) {row['sha256']}")
+    elif a.rec_cmd == "history":
+        rows = audit.history(engine, a.record, a.limit)
+        if not rows:
+            log("No changes recorded (history starts once the database is live on PostgreSQL).")
+        for r in reversed(rows):
+            changes = r["changes"] or {}
+            if r["op"] == "UPDATE":
+                what = "; ".join(f"{k}: {v[0]!r} -> {v[1]!r}" for k, v in changes.items())
+            else:
+                what = f"{r['op'].lower()} {r['table_name']} {r['record_id']}"
+            log(f"{r['at']:%d %b %Y %H:%M}  {r['actor'] or ''}  {r['table_name']}  {what}"[:300])
+
+
 def cmd_merge_ui(a) -> None:
     import sqlalchemy as sa
     from .brightly import merge_ui
@@ -938,6 +970,24 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--received", required=True, help="Date received, YYYY-MM-DD.")
     q.add_argument("--detail")
     p.set_defaults(func=cmd_ofa)
+
+    p = sub.add_parser("records", help="Lock advice documents for 7 years in Azure, and show a "
+                                       "record's change history.")
+    p.add_argument("--db", default=env("BRIGHTLY_DB_URL"), help="SQLAlchemy database URL.")
+    p.add_argument("--actor", help="Name recorded (default: your login).")
+    rsub = p.add_subparsers(dest="rec_cmd", required=True, metavar="step")
+    q = rsub.add_parser("lock", help="Lock a final advice document (can't be changed for 7 years).")
+    q.add_argument("file")
+    q.add_argument("--client", help="Family group id, e.g. H-12345.")
+    q.add_argument("--kind", required=True,
+                   choices=["soa", "roa", "consent", "file_note", "fact_find", "other"])
+    q.add_argument("--date", help="Record date YYYY-MM-DD (default today).")
+    q.add_argument("--title")
+    q.add_argument("--sas", help="SAS URL (default ADVICE_RECORDS_SAS_URL).")
+    q = rsub.add_parser("history", help="Who changed what on a record.")
+    q.add_argument("record", help="Family group or entity id, e.g. H-12345.")
+    q.add_argument("--limit", type=int, default=200)
+    p.set_defaults(func=cmd_records)
 
     p = sub.add_parser("merge-ui", help="Open the duplicate review page: compare two family "
                                         "groups or entities side by side and merge them.")

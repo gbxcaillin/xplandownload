@@ -215,6 +215,32 @@ Phase 2 is a normal full export. Loading it adds the inactive family groups and 
 links. Records already edited in Brightly are skipped (`--overwrite-edited` to force), so work
 done since phase 1 is kept.
 
+### Ongoing fee consents, change history and locked advice records
+
+```
+python -m xplan_extract ofa seed                    # one arrangement per Active client with a fee
+python -m xplan_extract ofa worklist                # Excel: lapsed, urgent, due soon, open ...
+python -m xplan_extract ofa form OFA-H-12345-1      # Word consent form for e-signing
+python -m xplan_extract ofa consent OFA-H-12345-1 --signed 2026-11-03 --method esign
+python -m xplan_extract records lock "SOA.pdf" --client H-12345 --kind soa
+python -m xplan_extract records history H-12345
+```
+
+The consent rules follow ASIC INFO 286. The window runs from 60 days before to 150 days after
+each anniversary. Without consent in the window the arrangement ends, and the account providers
+must be told within 10 business days (the count skips Victorian public holidays). A written
+withdrawal must be acknowledged, any later fees refunded and the providers told within 10
+business days. Every step is kept in `ofa_event`, which can't be edited, for at least 5 years.
+Arrangements created from Xplan start flagged "confirm the last consent", because Xplan's
+consent history isn't in the extract. Where an Xplan file note looks like a consent, its date
+is offered as a hint.
+
+On PostgreSQL every change to a client record is written to `audit_log` (who, when, old and new
+values). The app names the person with `audit.set_actor(conn, email)`. Imports are recorded once,
+not row by row. `records lock` copies a final document to the Azure container `advice-records`
+with a **locked** 7-year retention policy, so it can't be changed or deleted, by anyone, until
+then. Its SHA-256 fingerprint is kept for checking copies.
+
 ### Duplicate family groups and entities (merge)
 
 Brightly calls a household a **family group**. When the same family group or entity exists

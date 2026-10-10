@@ -358,7 +358,9 @@ def load_export(engine: sa.Engine, export_dir: Path, *, dry_run: bool = False,
         return res
 
     # load
+    from . import audit
     with engine.begin() as conn:
+        audit.quiet(conn)                # the import is recorded once, in import_run/change_log
         hh = records["family_group"] + records["prospect"]
         skip = set() if overwrite_edited else _edited(conn, db.family_group, [r["id"] for r in hh])
         skip |= set() if overwrite_edited else _edited(

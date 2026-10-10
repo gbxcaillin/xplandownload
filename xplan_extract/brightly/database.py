@@ -360,11 +360,42 @@ ofa_event = sa.Table(                                          # append-only evi
     sa.Index("ix_ofa_event_arrangement", "arrangement_id"),
 )
 
+audit_log = sa.Table(                                          # filled by triggers (audit.py)
+    "audit_log", metadata,
+    _auto(),
+    sa.Column("at", Stamp, nullable=False),
+    sa.Column("actor", sa.String(200)),
+    sa.Column("table_name", sa.String(64), nullable=False),
+    sa.Column("record_id", sa.String(64), nullable=False),
+    sa.Column("op", sa.String(8), nullable=False),             # INSERT | UPDATE | DELETE
+    sa.Column("changes", JSONType),
+    sa.Index("ix_audit_record", "record_id"),
+    sa.Index("ix_audit_at", "at"),
+)
+
+advice_record = sa.Table(                                      # locked copies (records.py)
+    "advice_record", metadata,
+    _auto(),
+    # no foreign key: a locked record outlives merges and deletions of the client record
+    sa.Column("family_group_id", sa.String(64)),
+    sa.Column("kind", sa.String(40), nullable=False),          # soa | roa | consent | file_note ...
+    sa.Column("title", sa.String(500)),
+    sa.Column("record_date", sa.Date, nullable=False),
+    sa.Column("file_name", sa.String(500)),
+    sa.Column("sha256", sa.String(64), nullable=False),
+    sa.Column("size", sa.BigInteger),
+    sa.Column("blob_path", sa.String(1000), nullable=False, unique=True),
+    sa.Column("locked_until", sa.Date, nullable=False),
+    sa.Column("created_by", sa.String(200)),
+    sa.Column("created_at", Stamp, nullable=False),
+    sa.Index("ix_advice_record_family_group", "family_group_id"),
+)
+
 # Tables a re-import rebuilds for a family group (only their source='xplan' rows).
 FAMILY_GROUP_CHILDREN = [contact_point, account, asset_liability, goal, advice_history, file_note,
                       signed_document]
 
-APPEND_ONLY_TABLES = ("change_log", "ofa_event")
+APPEND_ONLY_TABLES = ("change_log", "ofa_event", "audit_log", "advice_record")
 
 
 def _append_only_pg(table: str) -> str:
@@ -406,6 +437,8 @@ def ddl(dialect: str) -> str:
 
 def create_all(engine: sa.Engine) -> None:
     metadata.create_all(engine)
+    from . import audit
+    audit.install(engine)
     for table in APPEND_ONLY_TABLES:
         name = f"{table}_no_update"
         if engine.dialect.name == "postgresql":
