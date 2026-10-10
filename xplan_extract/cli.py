@@ -267,6 +267,83 @@ def cmd_load(a) -> None:
     log("Table counts now: " + ", ".join(f"{k} {v:,}" for k, v in loader.table_counts(engine).items()))
 
 
+def _date(text: str):
+    try:
+        return dt.date.fromisoformat(text)
+    except (TypeError, ValueError):
+        raise SystemExit(f"Dates are YYYY-MM-DD, e.g. 2026-11-03 (got {text!r})")
+
+
+def cmd_ofa(a) -> None:
+    import sqlalchemy as sa
+    from .brightly import ofa_store
+    from .brightly.ofa_form import Practice, build, form_for
+
+    if not a.db:
+        raise SystemExit("Pass --db URL (or set BRIGHTLY_DB_URL in .env).")
+    engine = sa.create_engine(a.db)
+    who = a.actor or getpass.getuser()
+    today = _date(a.today) if getattr(a, "today", None) else dt.date.today()
+    out_dir = Path(a.out or env("BRIGHTLY_OUT") or "output") / "Ongoing fees"
+    try:
+        if a.ofa_cmd == "seed":
+            r = ofa_store.seed(engine, who, today, only_active=not a.all, dry_run=a.dry_run)
+            log(("DRY RUN: " if a.dry_run else "") + f"{r['created']} arrangement(s) "
+                f"{'would be ' if a.dry_run else ''}created; {r['skipped_existing']} already "
+                f"existed; {r['no_anniversary']} family group(s) with a fee but no anniversary.")
+            log(f"  {r['with_note_hint']} have an Xplan file note suggesting the last consent.")
+            log("Next: confirm each one's last consent (ofa confirm) and add the deduction "
+                "accounts (ofa account). The worklist shows what's missing.")
+        elif a.ofa_cmd == "worklist":
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"Ongoing fee consents {today:%Y-%m-%d}.xlsx"
+            counts = ofa_store.write_worklist(ofa_store.worklist(engine, today), path, today)
+            labels = {"lapsed": "lapsed (act now)", "urgent": "urgent", "due_soon": "due soon",
+                      "open": "window open", "upcoming": "opening soon", "covered": "current",
+                      "check": "need details", "ended": "ended"}
+            for k in ("lapsed", "urgent", "due_soon", "open", "upcoming", "check", "covered",
+                      "ended"):
+                if counts.get(k):
+                    log(f"  {counts[k]:>4}  {labels[k]}")
+            log(f"Worklist: {path}")
+        elif a.ofa_cmd == "form":
+            form = form_for(engine, a.arrangement, _date(a.anniversary) if a.anniversary else None,
+                            today)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            name = " and ".join(form.client_names)
+            path = out_dir / f"Ongoing fee consent {form.anniversary:%Y} - {name}.docx"
+            build(form, Practice.from_env(), path)
+            log(f"Consent form: {path}")
+            if not form.accounts:
+                log("  Note: no deduction account recorded yet; the account table is blank.")
+        elif a.ofa_cmd == "consent":
+            anniv = ofa_store.record_consent(engine, a.arrangement, _date(a.signed), a.method,
+                                             who, signers=a.signers or "",
+                                             document_ref=a.doc or "")
+            log(f"Recorded: consent for the {anniv:%d %b %Y} anniversary.")
+        elif a.ofa_cmd == "confirm":
+            last = None if a.last_signed.lower() == "none" else _date(a.last_signed)
+            ofa_store.confirm_history(engine, a.arrangement, who, last)
+            log("Confirmed.")
+        elif a.ofa_cmd == "account":
+            ofa_store.add_account(engine, a.arrangement, a.provider, who,
+                                  account_name=a.name or "", account_number=a.number or "",
+                                  amount_annual=a.amount, holders=a.holders or "")
+            log("Account added.")
+        elif a.ofa_cmd == "lapse":
+            ofa_store.mark_lapsed(engine, a.arrangement, who, today,
+                                  _date(a.notified) if a.notified else None)
+            log("Marked lapsed" + (" and providers notified." if a.notified else
+                                   ". Record the provider notices with --notified when sent."))
+        elif a.ofa_cmd == "withdraw":
+            due = ofa_store.record_withdrawal(engine, a.arrangement, _date(a.received), who,
+                                              a.detail or "")
+            log(f"Recorded. Acknowledge in writing, refund any later fees and tell each "
+                f"provider by {due['acknowledge_by']:%d %b %Y}.")
+    except ofa_store.OfaError as exc:
+        raise SystemExit(str(exc))
+
+
 def cmd_merge_ui(a) -> None:
     import sqlalchemy as sa
     from .brightly import merge_ui
@@ -822,6 +899,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overwrite-edited", action="store_true",
                    help="Also overwrite records edited in Brightly since their last import.")
     p.set_defaults(func=cmd_load)
+
+    p = sub.add_parser("ofa", help="Ongoing fee arrangements: annual consent windows, forms, "
+                                   "lapses and withdrawals (ASIC INFO 286).")
+    p.add_argument("--db", default=env("BRIGHTLY_DB_URL"), help="SQLAlchemy database URL.")
+    p.add_argument("--actor", help="Name recorded against each step (default: your login).")
+    p.add_argument("--out", help="Folder for worklists and forms (default BRIGHTLY_OUT).")
+    p.add_argument("--today", help="Pretend today is this date (YYYY-MM-DD), for checking.")
+    osub = p.add_subparsers(dest="ofa_cmd", required=True, metavar="step")
+    q = osub.add_parser("seed", help="Create arrangements from the migrated family groups.")
+    q.add_argument("--all", action="store_true", help="Include Inactive family groups.")
+    q.add_argument("--dry-run", action="store_true")
+    osub.add_parser("worklist", help="Excel list of what's due, by when.")
+    q = osub.add_parser("form", help="The consent form (Word) for one arrangement.")
+    q.add_argument("arrangement")
+    q.add_argument("--anniversary", help="Which anniversary (default: the one due next).")
+    q = osub.add_parser("consent", help="Record a signed consent.")
+    q.add_argument("arrangement")
+    q.add_argument("--signed", required=True, help="Date signed, YYYY-MM-DD.")
+    q.add_argument("--method", default="esign", choices=["esign", "paper", "electronic"])
+    q.add_argument("--signers", help="Who signed (every joint holder).")
+    q.add_argument("--doc", help="Where the signed form is kept (SharePoint path).")
+    q = osub.add_parser("confirm", help="Confirm the last consent given under Xplan.")
+    q.add_argument("arrangement")
+    q.add_argument("last_signed", help="Date signed (YYYY-MM-DD), or 'none'.")
+    q = osub.add_parser("account", help="Add an account the fee is deducted from.")
+    q.add_argument("arrangement")
+    q.add_argument("--provider", required=True)
+    q.add_argument("--name", help="Account name.")
+    q.add_argument("--number", help="Account number.")
+    q.add_argument("--amount", type=float, help="Annual amount from this account.")
+    q.add_argument("--holders", help="Account holder names (all joint holders).")
+    q = osub.add_parser("lapse", help="End an arrangement whose window closed without consent.")
+    q.add_argument("arrangement")
+    q.add_argument("--notified", help="Date the account providers were told (YYYY-MM-DD).")
+    q = osub.add_parser("withdraw", help="The client ended the arrangement in writing.")
+    q.add_argument("arrangement")
+    q.add_argument("--received", required=True, help="Date received, YYYY-MM-DD.")
+    q.add_argument("--detail")
+    p.set_defaults(func=cmd_ofa)
 
     p = sub.add_parser("merge-ui", help="Open the duplicate review page: compare two family "
                                         "groups or entities side by side and merge them.")

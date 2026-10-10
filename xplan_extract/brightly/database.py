@@ -292,21 +292,95 @@ merge_record = sa.Table(
     sa.Index("ix_merge_kept", "kept_id"),
 )
 
+# -- Ongoing fee arrangements (OFA) and their annual consent (ASIC INFO 286, s962 rules) ------
+ofa_arrangement = sa.Table(
+    "ofa_arrangement", metadata,
+    _id(),                                                     # "OFA-<family group id>-<n>"
+    sa.Column("family_group_id", sa.ForeignKey("family_group.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+    # active | ended (client or adviser ended it) | lapsed (no consent in the window)
+    sa.Column("reference_day", sa.Date, nullable=False),       # anniversary basis (s962H)
+    sa.Column("started_on", sa.Date),
+    sa.Column("fee_annual", Money),                            # dollars a year (or the estimate)
+    sa.Column("fee_basis", sa.Text),                           # how it's calculated
+    sa.Column("frequency", sa.String(16)),                     # monthly | quarterly | annually
+    sa.Column("services", sa.Text),                            # what the client receives
+    sa.Column("adviser", sa.String(200)),
+    sa.Column("ended_on", sa.Date),
+    sa.Column("end_reason", sa.Text),
+    sa.Column("needs_review", sa.Text),                        # e.g. "consent history from Xplan"
+    _source(),
+    sa.Column("created_at", Stamp),
+    sa.Column("updated_at", Stamp),
+    sa.Index("ix_ofa_family_group", "family_group_id"),
+    sa.Index("ix_ofa_status", "status"),
+)
+
+ofa_account = sa.Table(                                        # where the fee is deducted from
+    "ofa_account", metadata,
+    _auto(),
+    sa.Column("arrangement_id", sa.ForeignKey("ofa_arrangement.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("provider", sa.String(300), nullable=False),     # platform / fund
+    sa.Column("account_name", sa.String(300)),
+    sa.Column("account_number", sa.String(100)),
+    sa.Column("amount_annual", Money),
+    sa.Column("holders", sa.Text),                             # every joint holder must consent
+    sa.Column("account_id", sa.ForeignKey("account.id", ondelete="SET NULL")),
+    sa.Index("ix_ofa_account_arrangement", "arrangement_id"),
+)
+
+ofa_consent = sa.Table(
+    "ofa_consent", metadata,
+    _auto(),
+    sa.Column("arrangement_id", sa.ForeignKey("ofa_arrangement.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("anniversary", sa.Date, nullable=False),         # the anniversary this renews
+    sa.Column("signed_on", sa.Date, nullable=False),
+    sa.Column("method", sa.String(32), nullable=False),        # esign | paper | electronic
+    sa.Column("signers", sa.Text),
+    sa.Column("covers_deduction", sa.Boolean, nullable=False, server_default=sa.true()),
+    sa.Column("document_ref", sa.String(1000)),                # SharePoint / vault location
+    sa.Column("recorded_by", sa.String(200)),
+    sa.Column("recorded_at", Stamp, nullable=False),
+    sa.Column("source", sa.String(16), nullable=False, server_default="brightly"),
+    sa.UniqueConstraint("arrangement_id", "anniversary"),
+)
+
+ofa_event = sa.Table(                                          # append-only evidence trail
+    "ofa_event", metadata,
+    _auto(),
+    sa.Column("arrangement_id", sa.ForeignKey("ofa_arrangement.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("at", Stamp, nullable=False),
+    sa.Column("kind", sa.String(40), nullable=False),
+    # form_sent | consent_recorded | lapsed | providers_notified | withdrawal_received |
+    # withdrawal_acknowledged | refund_made | ended | note
+    sa.Column("anniversary", sa.Date),
+    sa.Column("due_on", sa.Date),
+    sa.Column("actor", sa.String(200)),
+    sa.Column("detail", sa.Text),
+    sa.Index("ix_ofa_event_arrangement", "arrangement_id"),
+)
+
 # Tables a re-import rebuilds for a family group (only their source='xplan' rows).
 FAMILY_GROUP_CHILDREN = [contact_point, account, asset_liability, goal, advice_history, file_note,
                       signed_document]
 
-APPEND_ONLY_PG = """
-CREATE OR REPLACE FUNCTION change_log_append_only() RETURNS trigger AS $$
-BEGIN RAISE EXCEPTION 'change_log is append-only'; END; $$ LANGUAGE plpgsql;
-CREATE TRIGGER change_log_no_update BEFORE UPDATE OR DELETE ON change_log
-  FOR EACH ROW EXECUTE FUNCTION change_log_append_only();
-"""
+APPEND_ONLY_TABLES = ("change_log", "ofa_event")
 
-APPEND_ONLY_MSSQL = """
-CREATE TRIGGER change_log_no_update ON change_log INSTEAD OF UPDATE, DELETE AS
-BEGIN THROW 50001, 'change_log is append-only', 1; END;
-"""
+
+def _append_only_pg(table: str) -> str:
+    return (f"CREATE OR REPLACE FUNCTION {table}_append_only() RETURNS trigger AS $$\n"
+            f"BEGIN RAISE EXCEPTION '{table} is append-only'; END; $$ LANGUAGE plpgsql;\n"
+            f"CREATE TRIGGER {table}_no_update BEFORE UPDATE OR DELETE ON {table}\n"
+            f"  FOR EACH ROW EXECUTE FUNCTION {table}_append_only();")
+
+
+def _append_only_mssql(table: str) -> str:
+    return (f"CREATE TRIGGER {table}_no_update ON {table} INSTEAD OF UPDATE, DELETE AS\n"
+            f"BEGIN THROW 50001, '{table} is append-only', 1; END;")
+
+
+APPEND_ONLY_PG = "\n".join(_append_only_pg(t) for t in APPEND_ONLY_TABLES)
+APPEND_ONLY_MSSQL = "\nGO\n".join(_append_only_mssql(t) for t in APPEND_ONLY_TABLES)
 
 
 def ddl(dialect: str) -> str:
@@ -332,14 +406,21 @@ def ddl(dialect: str) -> str:
 
 def create_all(engine: sa.Engine) -> None:
     metadata.create_all(engine)
-    if engine.dialect.name == "postgresql":
-        with engine.begin() as c:
-            exists = c.execute(sa.text(
-                "SELECT 1 FROM pg_trigger WHERE tgname = 'change_log_no_update'")).first()
-            if not exists:
-                c.exec_driver_sql(APPEND_ONLY_PG)
-    elif engine.dialect.name == "mssql":
-        with engine.begin() as c:
-            if not c.execute(sa.text("SELECT 1 FROM sys.triggers WHERE name = "
-                                     "'change_log_no_update'")).first():
-                c.exec_driver_sql(APPEND_ONLY_MSSQL)
+    for table in APPEND_ONLY_TABLES:
+        name = f"{table}_no_update"
+        if engine.dialect.name == "postgresql":
+            with engine.begin() as c:
+                if not c.execute(sa.text("SELECT 1 FROM pg_trigger WHERE tgname = :n"),
+                                 {"n": name}).first():
+                    c.exec_driver_sql(_append_only_pg(table))
+        elif engine.dialect.name == "mssql":
+            with engine.begin() as c:
+                if not c.execute(sa.text("SELECT 1 FROM sys.triggers WHERE name = :n"),
+                                 {"n": name}).first():
+                    c.exec_driver_sql(_append_only_mssql(table))
+        elif engine.dialect.name == "sqlite":
+            with engine.begin() as c:
+                for op in ("UPDATE", "DELETE"):
+                    c.exec_driver_sql(
+                        f"CREATE TRIGGER IF NOT EXISTS {table}_no_{op.lower()} BEFORE {op} ON "
+                        f"{table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END")
