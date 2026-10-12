@@ -1,5 +1,8 @@
 # xplandownload
 
+> **Moved.** This code now lives in the private repo **bd-sme/brightly**, under `server/` (full history kept). Make changes there; this repo is kept read-only for reference.
+
+
 Downloads the Iress/Xplan data extract from the Iress MFT (SFTP) account and converts
 **every table** in it to **Excel** and **JSON**.
 
